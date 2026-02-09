@@ -1009,120 +1009,86 @@ class ChatToolsParticipantsProvider extends DataProvider {
   protected async fetch(): Promise<void> {
     this._agents = [];
 
-    // ── 1. Enumerate registered Language Model tools (vscode.lm.tools) ──
+    // ── 1. Log registered LM tools for diagnostics (don't create agent cards for every tool) ──
+    let totalToolCount = 0;
     try {
       const lmApi = (vscode as any).lm;
       if (lmApi && Array.isArray(lmApi.tools) && lmApi.tools.length > 0) {
-        // Group tools by namespace prefix to represent distinct agents/capabilities
-        const toolsByNamespace = new Map<string, any[]>();
+        totalToolCount = lmApi.tools.length;
+        // Group by namespace for logging only
+        const toolsByNamespace = new Map<string, string[]>();
         for (const tool of lmApi.tools) {
           const toolName: string = tool.name || '';
-          // Extract namespace: "vscode_search" → "vscode", "copilot_codeReview" → "copilot"
           const ns = toolName.includes('_') ? toolName.split('_')[0] : (toolName.includes('.') ? toolName.split('.')[0] : 'default');
           if (!toolsByNamespace.has(ns)) { toolsByNamespace.set(ns, []); }
-          toolsByNamespace.get(ns)!.push(tool);
+          toolsByNamespace.get(ns)!.push(toolName);
         }
-
+        // Log discovery for debugging but don't clutter the dashboard
         for (const [ns, tools] of toolsByNamespace) {
-          const toolNames = tools.map((t: any) => t.name || 'unknown');
-          // Skip very generic tool groups that aren't really "agents"
-          if (ns === 'default' && tools.length < 2) continue;
-
-          this._agents.push({
-            id: `lm-tools-${ns}`,
-            name: `${ns.charAt(0).toUpperCase() + ns.slice(1)} Tools`,
-            type: ns.includes('copilot') ? 'copilot' : ns.includes('claude') ? 'claude' : 'custom',
-            typeLabel: ns.charAt(0).toUpperCase() + ns.slice(1),
-            model: '—',
-            status: 'running',
-            task: `${tools.length} tool(s) registered: ${toolNames.slice(0, 3).join(', ')}${tools.length > 3 ? '...' : ''}`,
-            tokens: 0,
-            startTime: Date.now(),
-            elapsed: '—',
-            progress: 0,
-            progressLabel: `${tools.length} tools available`,
-            tools: toolNames,
-            activeTool: null,
-            files: [],
-            location: 'local',
-            sourceProvider: this.id
-          });
+          this._outputChannel.appendLine(`[${this.id}] LM tool namespace "${ns}": ${tools.length} tool(s)`);
         }
       }
     } catch (err: any) {
       this._outputChannel.appendLine(`[${this.id}] lm.tools error: ${err?.message}`);
     }
 
-    // ── 2. Scan installed extensions for chatParticipant contributions ──
+    // ── 2. Only surface non-built-in chat participants that are ACTIVE ──
+    let participantCount = 0;
     try {
-      const chatParticipants: { extId: string; id: string; name: string; description: string; commands: string[] }[] = [];
+      // Built-in / default participant IDs we should skip (these are always present and not "agents")
+      const builtInIds = new Set([
+        'copilot', 'github.copilot', 'github.copilot-chat',
+        'vscode', 'workspace', 'terminal',
+        'github.copilot.terminal', 'github.copilot.workspace', 'github.copilot.vscode',
+      ]);
 
       for (const ext of vscode.extensions.all) {
         try {
           const pkg = ext.packageJSON;
           if (!pkg || !pkg.contributes) continue;
 
-          // Check for chatParticipants contribution point
           const participants = pkg.contributes.chatParticipants;
-          if (Array.isArray(participants)) {
-            for (const p of participants) {
-              chatParticipants.push({
-                extId: ext.id,
-                id: p.id || p.name || ext.id,
-                name: p.fullName || p.name || ext.id,
-                description: p.description || '',
-                commands: Array.isArray(p.commands) ? p.commands.map((c: any) => c.name || c) : []
-              });
-            }
+          if (!Array.isArray(participants)) continue;
+
+          for (const p of participants) {
+            const pId = p.id || p.name || '';
+            participantCount++;
+
+            // Skip built-in participants — they're always present and aren't workspace-specific
+            if (builtInIds.has(pId) || builtInIds.has(ext.id)) continue;
+            // Skip if the parent extension isn't active
+            if (!ext.isActive) continue;
+
+            this._agents.push({
+              id: `chat-participant-${pId}`,
+              name: p.fullName || p.name || pId,
+              type: ext.id.toLowerCase().includes('copilot') ? 'copilot' :
+                    ext.id.toLowerCase().includes('claude') ? 'claude' : 'custom',
+              typeLabel: 'Chat Agent',
+              model: '—',
+              status: 'running',
+              task: p.description || `Chat participant @${pId}`,
+              tokens: 0,
+              startTime: Date.now(),
+              elapsed: '—',
+              progress: 0,
+              progressLabel: 'Available',
+              tools: Array.isArray(p.commands) ? p.commands.map((c: any) => c.name || c) : [],
+              activeTool: null,
+              files: [],
+              location: 'local',
+              sourceProvider: this.id
+            });
           }
-        } catch { /* skip individual extensions */ }
-      }
-
-      // Create agent entries for each discovered chat participant
-      for (const participant of chatParticipants) {
-        // Skip the default workspace agent — it's always there
-        if (participant.id === 'copilot' || participant.id === 'github.copilot') continue;
-
-        const isActive = vscode.extensions.getExtension(participant.extId)?.isActive ?? false;
-
-        this._agents.push({
-          id: `chat-participant-${participant.id}`,
-          name: participant.name,
-          type: participant.extId.toLowerCase().includes('copilot') ? 'copilot' :
-                participant.extId.toLowerCase().includes('claude') ? 'claude' : 'custom',
-          typeLabel: 'Chat Agent',
-          model: '—',
-          status: isActive ? 'running' : 'paused',
-          task: participant.description || `Chat participant from ${participant.extId}`,
-          tokens: 0,
-          startTime: Date.now(),
-          elapsed: '—',
-          progress: 0,
-          progressLabel: isActive ? 'Active' : 'Inactive',
-          tools: participant.commands,
-          activeTool: null,
-          files: [],
-          location: 'local',
-          sourceProvider: this.id
-        });
+        } catch { /* skip */ }
       }
     } catch (err: any) {
       this._outputChannel.appendLine(`[${this.id}] Extension scan error: ${err?.message}`);
     }
 
-    // ── 3. Try to discover active chat sessions via commands ──
+    // ── 3. Try command-based chat session discovery ──
     try {
-      // VS Code 1.100+ may expose chat session data through commands
       const chatCommands = await vscode.commands.getCommands(true);
-      const chatSessionCmds = chatCommands.filter(c =>
-        c.includes('chat') && (c.includes('session') || c.includes('participant') || c.includes('agent'))
-      );
-
-      if (chatSessionCmds.length > 0) {
-        this._outputChannel.appendLine(`[${this.id}] Found chat-related commands: ${chatSessionCmds.join(', ')}`);
-      }
-
-      // Try known commands that might return session data
       for (const cmd of ['workbench.action.chat.listSessions', 'workbench.action.chat.getSessions']) {
         if (chatCommands.includes(cmd)) {
           try {
@@ -1153,7 +1119,7 @@ class ChatToolsParticipantsProvider extends DataProvider {
                 }
               }
             }
-          } catch { /* command not available or returned non-array */ }
+          } catch { /* command not available */ }
         }
       }
     } catch (err: any) {
@@ -1161,11 +1127,13 @@ class ChatToolsParticipantsProvider extends DataProvider {
     }
 
     this._state = 'connected';
-    if (this._agents.length > 0) {
-      this._message = `Discovered ${this._agents.length} chat agent(s) and tool provider(s)`;
-    } else {
-      this._message = 'No chat participants or LM tools detected.';
-    }
+    const parts: string[] = [];
+    if (totalToolCount > 0) parts.push(`${totalToolCount} LM tools`);
+    if (participantCount > 0) parts.push(`${participantCount} participants`);
+    if (this._agents.length > 0) parts.push(`${this._agents.length} active agent(s)`);
+    this._message = parts.length > 0
+      ? `Detected: ${parts.join(', ')}`
+      : 'No chat participants or LM tools detected.';
   }
 }
 
@@ -2118,7 +2086,8 @@ function getWebviewContent(webview: vscode.Webview): string {
 
   /* Data source health */
   .ds-list { display:flex; flex-direction:column; gap:6px; }
-  .ds-item { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:10px; }
+  .ds-item { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:10px; cursor:pointer; border-radius:4px; padding:5px 4px; transition:background 0.15s; }
+  .ds-item:hover { background:var(--surface2); }
   .ds-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
   .ds-connected { background:var(--green); box-shadow:0 0 4px rgba(0,184,148,0.4); }
   .ds-degraded { background:var(--orange); box-shadow:0 0 4px rgba(243,156,18,0.4); }
@@ -2135,7 +2104,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   .empty-state .hint { font-size:10px; opacity:0.6; margin-top:4px; }
 
   /* Search & Filter */
-  .search-filter-bar { display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap; }
+  .search-filter-bar { display:flex; gap:8px; margin-bottom:6px; align-items:center; flex-wrap:wrap; }
   .search-input { flex:1; min-width:140px; padding:6px 10px 6px 30px; border-radius:7px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:11px; font-family:inherit; outline:none; transition:border-color 0.15s; }
   .search-input:focus { border-color:var(--accent); }
   .search-wrap { position:relative; flex:1; min-width:140px; }
@@ -2146,6 +2115,11 @@ function getWebviewContent(webview: vscode.Webview): string {
   .filter-chip.active { background:var(--accent-glow); border-color:var(--accent); color:var(--accent); font-weight:600; }
   .filter-chip .chip-count { display:inline-block; margin-left:3px; padding:0 5px; background:rgba(255,255,255,0.08); border-radius:8px; font-size:8px; }
   .filter-chip.active .chip-count { background:rgba(108,92,231,0.25); }
+  .provider-filter-bar { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
+  .provider-filter-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; margin-right:2px; }
+  .provider-chip { padding:2px 8px; border-radius:10px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:8px; cursor:pointer; font-weight:500; transition:all 0.15s; font-family:inherit; white-space:nowrap; }
+  .provider-chip:hover { border-color:var(--accent); color:var(--text); }
+  .provider-chip.active { background:var(--cyan); background:rgba(0,206,201,0.12); border-color:var(--cyan); color:var(--cyan); font-weight:600; }
 
   @media (max-width:900px) { .main-grid { grid-template-columns:1fr; } .stats-row { grid-template-columns:repeat(3,1fr); } }
 </style>
@@ -2155,7 +2129,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.8.0</span></h1>
+      <h1>Agent Dashboard <span>v0.9.0</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -2179,6 +2153,7 @@ function getWebviewContent(webview: vscode.Webview): string {
         </div>
         <div class="filter-chips" id="filter-chips"></div>
       </div>
+      <div class="provider-filter-bar" id="provider-filter-bar"></div>
       <div class="agent-list" id="agents"></div>
     </div>
     <div class="right-panel">
@@ -2212,6 +2187,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   var lastUpdate = null;
   var currentState = null;
   var activeStatusFilter = null;
+  var activeProviderFilter = null;
 
   // ── Event listeners for static elements (replacing inline handlers) ──
   document.getElementById('btn-refresh').addEventListener('click', function() { send('refresh'); });
@@ -2227,6 +2203,15 @@ function getWebviewContent(webview: vscode.Webview): string {
     activeStatusFilter = (status === activeStatusFilter) ? null : status;
     applyFilter();
   });
+  // Provider filter chips (event delegation)
+  document.getElementById('provider-filter-bar').addEventListener('click', function(e) {
+    var btn = e.target.closest('.provider-chip');
+    if (!btn) return;
+    var provider = btn.getAttribute('data-provider') || null;
+    activeProviderFilter = (provider === activeProviderFilter) ? null : provider;
+    applyFilter();
+  });
+
   // Expand/collapse inline details
   document.getElementById('agents').addEventListener('click', function(e) {
     // Toggle expand on the expand button only
@@ -2243,6 +2228,16 @@ function getWebviewContent(webview: vscode.Webview): string {
       if (agentId) openDetailPanel(agentId);
       return;
     }
+  });
+
+  // Data source click → filter by that provider
+  document.getElementById('datasources').addEventListener('click', function(e) {
+    var item = e.target.closest('.ds-item');
+    if (!item) return;
+    var providerId = item.getAttribute('data-provider-id');
+    if (!providerId) return;
+    activeProviderFilter = (providerId === activeProviderFilter) ? null : providerId;
+    applyFilter();
   });
 
   // Close detail panel
@@ -2336,6 +2331,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   }
 
   function renderFilterChips(agents) {
+    // Status filter chips
     var counts = {};
     for (var i = 0; i < agents.length; i++) counts[agents[i].status] = (counts[agents[i].status]||0) + 1;
     var statuses = ['running','thinking','paused','done','error','queued'];
@@ -2348,6 +2344,46 @@ function getWebviewContent(webview: vscode.Webview): string {
       }
     }
     document.getElementById('filter-chips').innerHTML = html;
+
+    // Provider / source filter chips
+    var provCounts = {};
+    var provNames = {};
+    for (var pi = 0; pi < agents.length; pi++) {
+      var sp = agents[pi].sourceProvider;
+      provCounts[sp] = (provCounts[sp]||0) + 1;
+      // Friendly short names
+      if (!provNames[sp]) {
+        var nameMap = {
+          'copilot-extension': 'Copilot',
+          'vscode-chat-sessions': 'Chat Sessions',
+          'chat-tools-participants': 'Chat Agents',
+          'custom-workspace-agents': 'Custom Agents',
+          'terminal-processes': 'Terminals',
+          'claude-desktop-todos': 'Claude Desktop',
+          'github-actions': 'GitHub Actions',
+          'remote-connections': 'Remote',
+          'workspace-activity': 'Workspace'
+        };
+        provNames[sp] = nameMap[sp] || sp;
+      }
+    }
+    var provKeys = Object.keys(provCounts).sort(function(a, b) { return provCounts[b] - provCounts[a]; });
+
+    // Only show provider filter if there are 2+ providers with agents
+    var provBar = document.getElementById('provider-filter-bar');
+    if (provKeys.length >= 2) {
+      var phtml = '<span class="provider-filter-label">Source:</span>';
+      phtml += '<button class="provider-chip'+(activeProviderFilter===null?' active':'')+'" data-provider="">All</button>';
+      for (var pk = 0; pk < provKeys.length; pk++) {
+        var key = provKeys[pk];
+        phtml += '<button class="provider-chip'+(activeProviderFilter===key?' active':'')+'" data-provider="'+key+'">'+provNames[key]+' ('+provCounts[key]+')</button>';
+      }
+      provBar.innerHTML = phtml;
+      provBar.style.display = '';
+    } else {
+      provBar.innerHTML = '';
+      provBar.style.display = 'none';
+    }
   }
 
   function renderAgents(agents) {
@@ -2356,6 +2392,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     renderFilterChips(agents);
 
     var filtered = agents;
+    if (activeProviderFilter) filtered = filtered.filter(function(a) { return a.sourceProvider === activeProviderFilter; });
     if (activeStatusFilter) filtered = filtered.filter(function(a) { return a.status === activeStatusFilter; });
     if (searchTerm) filtered = filtered.filter(function(a) {
       return a.name.toLowerCase().indexOf(searchTerm) !== -1 ||
@@ -2490,10 +2527,11 @@ function getWebviewContent(webview: vscode.Webview): string {
 
     document.getElementById('datasources').innerHTML = health.map(function(h) {
       var isWarn = h.state === 'degraded';
-      return '<div class="ds-item">'+
+      var isSelected = activeProviderFilter === h.id;
+      return '<div class="ds-item" data-provider-id="'+h.id+'" style="'+(isSelected?'background:var(--accent-glow);border:1px solid rgba(108,92,231,0.3);':'')+'">'+
         '<div class="ds-dot ds-'+h.state+'"></div>'+
         '<div style="flex:1;min-width:0">'+
-          '<div class="ds-name">'+h.name+'</div>'+
+          '<div class="ds-name" style="'+(isSelected?'color:var(--accent);':'')+'">'+h.name+'</div>'+
           '<div class="ds-msg'+(isWarn?' warn':'')+'">'+h.message+'</div>'+
         '</div>'+
         (h.agentCount?'<div class="ds-count">'+h.agentCount+'</div>':'')+
