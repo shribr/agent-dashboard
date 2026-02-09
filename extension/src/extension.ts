@@ -410,6 +410,97 @@ class CopilotExtensionProvider extends DataProvider {
       // Don't throw — let the base class error handling deal with it
       throw err;
     }
+
+    // ── Additional detection: Copilot-related extensions that add agent capabilities ──
+    try {
+      const agentExtensions = [
+        { id: 'GitHub.copilot-chat', label: 'Copilot Chat' },
+        { id: 'GitHub.copilot', label: 'Copilot' },
+        { id: 'GitHub.copilot-labs', label: 'Copilot Labs' },
+        { id: 'GitHub.copilot-nightly', label: 'Copilot Nightly' },
+      ];
+
+      // Check if Agent Mode is enabled via settings
+      const chatConfig = vscode.workspace.getConfiguration('chat');
+      const agentEnabled = chatConfig.get<boolean>('agent.enabled');
+      if (agentEnabled !== undefined) {
+        this._outputChannel.appendLine(`[${this.id}] Chat agent mode enabled: ${agentEnabled}`);
+      }
+
+      // Check for MCP servers configured in VS Code (these appear as tools in agent mode)
+      const mcpConfig = chatConfig.get<any>('mcp');
+      if (mcpConfig && typeof mcpConfig === 'object') {
+        const servers = mcpConfig.servers || mcpConfig;
+        const serverNames = Object.keys(servers).filter(k => k !== 'servers');
+        if (serverNames.length > 0) {
+          for (const serverName of serverNames) {
+            const server = servers[serverName];
+            const isDisabled = server?.disabled === true;
+            if (isDisabled) continue;
+
+            this._agents.push({
+              id: `mcp-server-${serverName}`,
+              name: `MCP: ${serverName}`,
+              type: 'custom',
+              typeLabel: 'MCP Server',
+              model: '—',
+              status: 'running',
+              task: `MCP tool server: ${serverName}`,
+              tokens: 0,
+              startTime: Date.now(),
+              elapsed: '—',
+              progress: 0,
+              progressLabel: 'MCP Connected',
+              tools: Array.isArray(server?.tools) ? server.tools : [],
+              activeTool: null,
+              files: [],
+              location: 'local',
+              sourceProvider: this.id
+            });
+          }
+        }
+      }
+
+      // Check for workspace-level MCP configuration (.vscode/mcp.json)
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (workspaceFolders) {
+        for (const folder of workspaceFolders) {
+          const mcpJsonPath = path.join(folder.uri.fsPath, '.vscode', 'mcp.json');
+          if (fs.existsSync(mcpJsonPath)) {
+            try {
+              const mcpJson = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
+              const servers = mcpJson.servers || mcpJson.mcpServers || {};
+              for (const [name, config] of Object.entries(servers)) {
+                const serverId = `mcp-ws-${folder.name}-${name}`;
+                if (!this._agents.some(a => a.id === serverId)) {
+                  this._agents.push({
+                    id: serverId,
+                    name: `MCP: ${name}`,
+                    type: 'custom',
+                    typeLabel: 'MCP Server',
+                    model: '—',
+                    status: 'running',
+                    task: `Workspace MCP server: ${name}`,
+                    tokens: 0,
+                    startTime: Date.now(),
+                    elapsed: '—',
+                    progress: 0,
+                    progressLabel: 'MCP Connected',
+                    tools: [],
+                    activeTool: null,
+                    files: [],
+                    location: 'local',
+                    sourceProvider: this.id
+                  });
+                }
+              }
+            } catch { /* invalid mcp.json */ }
+          }
+        }
+      }
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Additional detection error: ${err?.message}`);
+    }
   }
 
   private mapCopilotStatus(session: any): AgentSession['status'] {
@@ -909,6 +1000,266 @@ class WorkspaceActivityProvider extends DataProvider {
   }
 }
 
+// ─── Provider: Chat Tools & Participants Discovery ───────────────────────────
+
+class ChatToolsParticipantsProvider extends DataProvider {
+  readonly name = 'Chat Tools & Agents';
+  readonly id = 'chat-tools-participants';
+
+  protected async fetch(): Promise<void> {
+    this._agents = [];
+
+    // ── 1. Enumerate registered Language Model tools (vscode.lm.tools) ──
+    try {
+      const lmApi = (vscode as any).lm;
+      if (lmApi && Array.isArray(lmApi.tools) && lmApi.tools.length > 0) {
+        // Group tools by namespace prefix to represent distinct agents/capabilities
+        const toolsByNamespace = new Map<string, any[]>();
+        for (const tool of lmApi.tools) {
+          const toolName: string = tool.name || '';
+          // Extract namespace: "vscode_search" → "vscode", "copilot_codeReview" → "copilot"
+          const ns = toolName.includes('_') ? toolName.split('_')[0] : (toolName.includes('.') ? toolName.split('.')[0] : 'default');
+          if (!toolsByNamespace.has(ns)) { toolsByNamespace.set(ns, []); }
+          toolsByNamespace.get(ns)!.push(tool);
+        }
+
+        for (const [ns, tools] of toolsByNamespace) {
+          const toolNames = tools.map((t: any) => t.name || 'unknown');
+          // Skip very generic tool groups that aren't really "agents"
+          if (ns === 'default' && tools.length < 2) continue;
+
+          this._agents.push({
+            id: `lm-tools-${ns}`,
+            name: `${ns.charAt(0).toUpperCase() + ns.slice(1)} Tools`,
+            type: ns.includes('copilot') ? 'copilot' : ns.includes('claude') ? 'claude' : 'custom',
+            typeLabel: ns.charAt(0).toUpperCase() + ns.slice(1),
+            model: '—',
+            status: 'running',
+            task: `${tools.length} tool(s) registered: ${toolNames.slice(0, 3).join(', ')}${tools.length > 3 ? '...' : ''}`,
+            tokens: 0,
+            startTime: Date.now(),
+            elapsed: '—',
+            progress: 0,
+            progressLabel: `${tools.length} tools available`,
+            tools: toolNames,
+            activeTool: null,
+            files: [],
+            location: 'local',
+            sourceProvider: this.id
+          });
+        }
+      }
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] lm.tools error: ${err?.message}`);
+    }
+
+    // ── 2. Scan installed extensions for chatParticipant contributions ──
+    try {
+      const chatParticipants: { extId: string; id: string; name: string; description: string; commands: string[] }[] = [];
+
+      for (const ext of vscode.extensions.all) {
+        try {
+          const pkg = ext.packageJSON;
+          if (!pkg || !pkg.contributes) continue;
+
+          // Check for chatParticipants contribution point
+          const participants = pkg.contributes.chatParticipants;
+          if (Array.isArray(participants)) {
+            for (const p of participants) {
+              chatParticipants.push({
+                extId: ext.id,
+                id: p.id || p.name || ext.id,
+                name: p.fullName || p.name || ext.id,
+                description: p.description || '',
+                commands: Array.isArray(p.commands) ? p.commands.map((c: any) => c.name || c) : []
+              });
+            }
+          }
+        } catch { /* skip individual extensions */ }
+      }
+
+      // Create agent entries for each discovered chat participant
+      for (const participant of chatParticipants) {
+        // Skip the default workspace agent — it's always there
+        if (participant.id === 'copilot' || participant.id === 'github.copilot') continue;
+
+        const isActive = vscode.extensions.getExtension(participant.extId)?.isActive ?? false;
+
+        this._agents.push({
+          id: `chat-participant-${participant.id}`,
+          name: participant.name,
+          type: participant.extId.toLowerCase().includes('copilot') ? 'copilot' :
+                participant.extId.toLowerCase().includes('claude') ? 'claude' : 'custom',
+          typeLabel: 'Chat Agent',
+          model: '—',
+          status: isActive ? 'running' : 'paused',
+          task: participant.description || `Chat participant from ${participant.extId}`,
+          tokens: 0,
+          startTime: Date.now(),
+          elapsed: '—',
+          progress: 0,
+          progressLabel: isActive ? 'Active' : 'Inactive',
+          tools: participant.commands,
+          activeTool: null,
+          files: [],
+          location: 'local',
+          sourceProvider: this.id
+        });
+      }
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Extension scan error: ${err?.message}`);
+    }
+
+    // ── 3. Try to discover active chat sessions via commands ──
+    try {
+      // VS Code 1.100+ may expose chat session data through commands
+      const chatCommands = await vscode.commands.getCommands(true);
+      const chatSessionCmds = chatCommands.filter(c =>
+        c.includes('chat') && (c.includes('session') || c.includes('participant') || c.includes('agent'))
+      );
+
+      if (chatSessionCmds.length > 0) {
+        this._outputChannel.appendLine(`[${this.id}] Found chat-related commands: ${chatSessionCmds.join(', ')}`);
+      }
+
+      // Try known commands that might return session data
+      for (const cmd of ['workbench.action.chat.listSessions', 'workbench.action.chat.getSessions']) {
+        if (chatCommands.includes(cmd)) {
+          try {
+            const result = await vscode.commands.executeCommand(cmd);
+            if (result && Array.isArray(result)) {
+              for (const session of result) {
+                const sid = session.id || `chat-session-${Date.now()}`;
+                if (!this._agents.some(a => a.id === sid)) {
+                  this._agents.push({
+                    id: sid,
+                    name: session.title || session.name || 'Chat Session',
+                    type: 'copilot',
+                    typeLabel: 'Chat',
+                    model: session.model || '—',
+                    status: 'running',
+                    task: session.title || 'Active chat session',
+                    tokens: session.tokenCount || 0,
+                    startTime: session.createdAt ? new Date(session.createdAt).getTime() : Date.now(),
+                    elapsed: '—',
+                    progress: 50,
+                    progressLabel: 'Active',
+                    tools: [],
+                    activeTool: null,
+                    files: [],
+                    location: 'local',
+                    sourceProvider: this.id
+                  });
+                }
+              }
+            }
+          } catch { /* command not available or returned non-array */ }
+        }
+      }
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Command discovery error: ${err?.message}`);
+    }
+
+    this._state = 'connected';
+    if (this._agents.length > 0) {
+      this._message = `Discovered ${this._agents.length} chat agent(s) and tool provider(s)`;
+    } else {
+      this._message = 'No chat participants or LM tools detected.';
+    }
+  }
+}
+
+// ─── Provider: Custom Workspace Agents (.github/agents/) ─────────────────────
+
+class CustomAgentsProvider extends DataProvider {
+  readonly name = 'Custom Agents';
+  readonly id = 'custom-workspace-agents';
+
+  protected async fetch(): Promise<void> {
+    this._agents = [];
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+      this._state = 'connected';
+      this._message = 'No workspace open.';
+      return;
+    }
+
+    let totalAgents = 0;
+
+    for (const folder of workspaceFolders) {
+      const agentsDir = path.join(folder.uri.fsPath, '.github', 'agents');
+
+      if (!fs.existsSync(agentsDir)) continue;
+
+      try {
+        const files = fs.readdirSync(agentsDir).filter(f => f.endsWith('.md'));
+
+        for (const file of files) {
+          try {
+            const filePath = path.join(agentsDir, file);
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const agentName = path.basename(file, '.md');
+
+            // Parse front matter or first lines for description
+            let description = '';
+            let model = '—';
+            let tools: string[] = [];
+
+            // Check for YAML front matter
+            const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+            if (fmMatch) {
+              const fm = fmMatch[1];
+              const descMatch = fm.match(/description:\s*(.+)/);
+              if (descMatch) description = descMatch[1].trim();
+              const modelMatch = fm.match(/model:\s*(.+)/);
+              if (modelMatch) model = modelMatch[1].trim();
+              const toolsMatch = fm.match(/tools:\s*\[([^\]]+)\]/);
+              if (toolsMatch) tools = toolsMatch[1].split(',').map(t => t.trim().replace(/['"]/g, ''));
+            }
+
+            // If no front matter description, use first non-empty line
+            if (!description) {
+              const firstLine = content.split('\n').find(l => l.trim() && !l.startsWith('#') && !l.startsWith('---'));
+              description = firstLine?.trim().substring(0, 100) || `Custom agent: ${agentName}`;
+            }
+
+            // Check if content mentions "infer" capability (subagent support)
+            const canInfer = content.toLowerCase().includes('"infer"') || content.toLowerCase().includes('subagent');
+
+            this._agents.push({
+              id: `custom-agent-${folder.name}-${agentName}`,
+              name: `@${agentName}`,
+              type: 'custom',
+              typeLabel: canInfer ? 'Subagent' : 'Custom',
+              model,
+              status: 'running', // Custom agents are always available when defined
+              task: description,
+              tokens: 0,
+              startTime: Date.now(),
+              elapsed: '—',
+              progress: 0,
+              progressLabel: canInfer ? 'Subagent capable' : 'Available',
+              tools,
+              activeTool: null,
+              files: [filePath],
+              location: 'local',
+              sourceProvider: this.id
+            });
+
+            totalAgents++;
+          } catch { /* skip individual agent file */ }
+        }
+      } catch { /* skip folder */ }
+    }
+
+    this._state = 'connected';
+    this._message = totalAgents > 0
+      ? `Found ${totalAgents} custom agent(s) in .github/agents/`
+      : 'No custom agents found in .github/agents/.';
+  }
+}
+
 // ─── Alert Engine ────────────────────────────────────────────────────────────
 
 type AlertEvent = 'agent-completed' | 'agent-error' | 'agent-started' | 'provider-degraded';
@@ -1217,6 +1568,8 @@ class DashboardProvider {
     this.allProviders = [
       { provider: new VSCodeChatSessionsProvider(this.outputChannel), group: 'copilot' },
       { provider: new CopilotExtensionProvider(this.outputChannel), group: 'copilot' },
+      { provider: new ChatToolsParticipantsProvider(this.outputChannel), group: 'copilot' },
+      { provider: new CustomAgentsProvider(this.outputChannel), group: 'both' },
       { provider: new TerminalProcessProvider(this.outputChannel), group: 'both' },
       { provider: new ClaudeDesktopTodosProvider(this.outputChannel), group: 'claude-code' },
       { provider: new GitHubActionsProvider(this.outputChannel), group: 'both' },
@@ -1524,7 +1877,7 @@ class DashboardProvider {
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.4.0', uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', version: '0.9.0', uptime: process.uptime() }));
         return;
       }
 

@@ -4,6 +4,7 @@ struct AgentListView: View {
     let agents: [AgentSession]
     @State private var filter: AgentStatus? = nil
     @State private var expandedAgent: String? = nil
+    @State private var detailAgent: AgentSession? = nil
     @State private var searchText: String = ""
 
     var filteredAgents: [AgentSession] {
@@ -91,18 +92,27 @@ struct AgentListView: View {
                 } else {
                     LazyVStack(spacing: 12) {
                         ForEach(filteredAgents) { agent in
-                            AgentCard(agent: agent, isExpanded: expandedAgent == agent.id)
-                                .onTapGesture {
+                            AgentCard(
+                                agent: agent,
+                                isExpanded: expandedAgent == agent.id,
+                                onToggleExpand: {
                                     withAnimation(.spring(response: 0.3)) {
                                         expandedAgent = expandedAgent == agent.id ? nil : agent.id
                                     }
+                                },
+                                onShowDetails: {
+                                    detailAgent = agent
                                 }
+                            )
                         }
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 20)
                 }
             }
+        }
+        .sheet(item: $detailAgent) { agent in
+            AgentDetailPanel(agent: agent)
         }
     }
 
@@ -146,6 +156,8 @@ struct FilterChip: View {
 struct AgentCard: View {
     let agent: AgentSession
     let isExpanded: Bool
+    let onToggleExpand: () -> Void
+    let onShowDetails: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -174,15 +186,28 @@ struct AgentCard: View {
 
                 Spacer()
 
-                // Status badge
-                Text(agent.status.displayName)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(statusColor.opacity(0.15))
-                    .foregroundStyle(statusColor)
-                    .clipShape(Capsule())
+                // Status badge + details button
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(agent.status.displayName)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(statusColor.opacity(0.15))
+                        .foregroundStyle(statusColor)
+                        .clipShape(Capsule())
+
+                    Button(action: onShowDetails) {
+                        Label("Details", systemImage: "chevron.right")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color(.tertiarySystemFill))
+                            .clipShape(Capsule())
+                    }
+                }
             }
 
             // Task description
@@ -231,7 +256,28 @@ struct AgentCard: View {
                 }
             }
 
-            // Expanded details
+            // Expand/collapse button
+            Button(action: onToggleExpand) {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                    if let tasks = agent.tasks, !tasks.isEmpty {
+                        let completed = tasks.filter { $0.status == .completed }.count
+                        Text("\(completed)/\(tasks.count) tasks")
+                            .font(.caption2)
+                    } else {
+                        Text("More info")
+                            .font(.caption2)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color(.tertiarySystemFill))
+                .clipShape(Capsule())
+            }
+
+            // Expanded inline details
             if isExpanded {
                 Divider()
 
@@ -356,6 +402,181 @@ struct AgentCard: View {
     }
 }
 
+// MARK: - Agent Detail Panel (slide-out sheet)
+
+struct AgentDetailPanel: View {
+    let agent: AgentSession
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Status header
+                    HStack {
+                        Image(systemName: agent.status.iconName)
+                            .foregroundStyle(statusColor)
+                            .font(.title2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(agent.name)
+                                .font(.headline)
+                            Text(agent.task)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(agent.status.displayName)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(statusColor.opacity(0.15))
+                            .foregroundStyle(statusColor)
+                            .clipShape(Capsule())
+                    }
+
+                    Divider()
+
+                    // Info section
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("INFO")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+                            .tracking(0.5)
+
+                        DetailRow(label: "Model", value: agent.model)
+                        DetailRow(label: "Provider", value: agent.sourceProvider)
+                        DetailRow(label: "Elapsed", value: agent.elapsed)
+                        DetailRow(label: "Tokens", value: formatTokens(agent.tokens))
+                        DetailRow(label: "Location", value: agent.remoteHost ?? agent.location.rawValue.capitalized)
+
+                        if let pid = agent.pid {
+                            DetailRow(label: "PID", value: "\(pid)")
+                        }
+                        if let tool = agent.activeTool {
+                            DetailRow(label: "Active Tool", value: tool)
+                        }
+                    }
+
+                    // Tasks & Todos section
+                    if let tasks = agent.tasks, !tasks.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            let completed = tasks.filter { $0.status == .completed }.count
+                            Text("TASKS & TODOS (\(completed)/\(tasks.count) done)")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .tracking(0.5)
+
+                            ForEach(tasks) { task in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: task.status.iconName)
+                                        .font(.subheadline)
+                                        .foregroundStyle(task.status.color)
+                                        .frame(width: 20)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(task.activeForm ?? task.content)
+                                            .font(.subheadline)
+                                            .foregroundStyle(task.status == .completed ? .secondary : .primary)
+                                            .strikethrough(task.status == .completed)
+                                            .fontWeight(task.status == .in_progress ? .semibold : .regular)
+
+                                        Text(task.status.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
+                                            .font(.caption2)
+                                            .foregroundStyle(task.status.color)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
+
+                    // Files section
+                    if !agent.files.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("FILES (\(agent.files.count))")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .tracking(0.5)
+
+                            ForEach(agent.files, id: \.self) { file in
+                                HStack(spacing: 6) {
+                                    Image(systemName: "doc.text")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(file)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                    }
+
+                    // Tools section
+                    if !agent.tools.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("TOOLS")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .tracking(0.5)
+
+                            FlowLayout(spacing: 6) {
+                                ForEach(agent.tools, id: \.self) { tool in
+                                    Text(tool)
+                                        .font(.caption)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color(.tertiarySystemFill))
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Agent Details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var statusColor: Color {
+        switch agent.status {
+        case .running: return .blue
+        case .thinking: return .purple
+        case .paused: return .orange
+        case .done: return .green
+        case .error: return .red
+        case .queued: return .gray
+        }
+    }
+
+    private func formatTokens(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            return String(format: "%.1fM", Double(tokens) / 1_000_000)
+        } else if tokens >= 1_000 {
+            return String(format: "%.1fK", Double(tokens) / 1_000)
+        }
+        return "\(tokens)"
+    }
+}
+
 // MARK: - Indeterminate Progress Bar
 
 struct IndeterminateProgressBar: View {
@@ -385,7 +606,7 @@ struct IndeterminateProgressBar: View {
         .frame(height: 4)
         .onAppear {
             withAnimation(
-                .linear(duration: 1.6)
+                .linear(duration: 3.0)
                 .repeatForever(autoreverses: false)
             ) {
                 phase = 1.0
