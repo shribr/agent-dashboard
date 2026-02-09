@@ -48,6 +48,7 @@ struct AgentListView: View {
     static func friendlyProviderName(_ id: String) -> String {
         switch id {
         case "copilot-extension": return "Copilot"
+        case "copilot-chat-sessions": return "Copilot Sessions"
         case "vscode-chat-sessions": return "Chat Sessions"
         case "chat-tools-participants": return "Chat Agents"
         case "custom-workspace-agents": return "Custom Agents"
@@ -496,6 +497,37 @@ struct AgentCard: View {
                             }
                         }
                     }
+
+                    // Compact recent activity preview
+                    if let actions = agent.recentActions, !actions.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Recent Activity")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(actions.suffix(5).reversed()) { action in
+                                HStack(spacing: 6) {
+                                    Image(systemName: action.iconName)
+                                        .font(.caption2)
+                                        .foregroundStyle(action.iconColor)
+                                        .frame(width: 14)
+                                    Text(action.tool)
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.secondary)
+                                    Text(action.detail)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            if actions.count > 5 {
+                                Text("+ \(actions.count - 5) more — tap Details for full timeline")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .italic()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -673,6 +705,106 @@ struct AgentDetailPanel: View {
                                         .clipShape(Capsule())
                                 }
                             }
+                        }
+                    }
+
+                    // Activity Timeline section
+                    if let actions = agent.recentActions, !actions.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("ACTIVITY TIMELINE (\(actions.count))")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .tracking(0.5)
+
+                            ForEach(actions.reversed()) { action in
+                                HStack(spacing: 10) {
+                                    // Tool icon
+                                    Image(systemName: action.iconName)
+                                        .font(.caption)
+                                        .foregroundStyle(action.iconColor)
+                                        .frame(width: 20)
+
+                                    // Tool name + detail
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(action.tool)
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .foregroundStyle(action.iconColor)
+                                            .textCase(.uppercase)
+
+                                        Text(action.detail)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+
+                                    Spacer()
+
+                                    // Status icon
+                                    Image(systemName: action.status.iconName)
+                                        .font(.caption2)
+                                        .foregroundStyle(action.status.color)
+                                }
+                                .padding(.vertical, 4)
+                                .padding(.horizontal, 8)
+                                .background(Color(.tertiarySystemFill).opacity(0.5))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+
+                    // Conversation Preview
+                    if let convo = agent.conversationPreview, !convo.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("CONVERSATION PREVIEW")
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.secondary)
+                                .tracking(0.5)
+
+                            ForEach(Array(convo.enumerated()), id: \.offset) { _, line in
+                                let isUser = line.hasPrefix("\u{1F464}")
+                                let isBot = line.hasPrefix("\u{1F916}")
+                                let isTool = line.hasPrefix("\u{1F527}")
+                                let isProgress = line.hasPrefix("\u{23F3}")
+
+                                HStack(alignment: .top, spacing: 6) {
+                                    Rectangle()
+                                        .fill(isUser ? Color.purple : isBot ? Color.green : isTool ? Color.cyan : Color.orange)
+                                        .frame(width: 2)
+
+                                    Text(line)
+                                        .font(.caption)
+                                        .foregroundStyle(isUser ? .primary : .secondary)
+                                        .lineLimit(3)
+                                }
+                                .padding(.vertical, 2)
+                                .padding(.horizontal, 6)
+                                .background(
+                                    (isUser ? Color.purple : isBot ? Color.green : isTool ? Color.cyan : Color.orange)
+                                        .opacity(0.05)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                    }
+
+                    // Parent agent link
+                    if let parentId = agent.parentId, !parentId.isEmpty {
+                        Divider()
+
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.turn.left.up")
+                                .font(.caption)
+                                .foregroundStyle(.purple)
+                            Text("Subagent of parent session")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }

@@ -47,6 +47,61 @@ enum AgentTaskStatus: String, Codable {
     }
 }
 
+struct AgentAction: Codable, Identifiable {
+    let tool: String
+    let detail: String
+    let timestamp: Double
+    let status: AgentActionStatus
+
+    var id: String { "\(tool)-\(detail)-\(timestamp)" }
+
+    var iconName: String {
+        switch tool {
+        case "Read": return "doc.text"
+        case "Edit": return "pencil"
+        case "Write": return "doc.badge.plus"
+        case "Bash": return "terminal"
+        case "Search": return "magnifyingglass"
+        case "Subagent": return "arrow.triangle.branch"
+        case "List": return "folder"
+        default: return "circle.fill"
+        }
+    }
+
+    var iconColor: Color {
+        switch tool {
+        case "Read": return .blue
+        case "Edit": return .orange
+        case "Write": return .green
+        case "Bash": return .cyan
+        case "Search": return .purple
+        case "Subagent": return .yellow
+        case "List": return .secondary
+        default: return .secondary
+        }
+    }
+}
+
+enum AgentActionStatus: String, Codable {
+    case running, done, error
+
+    var iconName: String {
+        switch self {
+        case .running: return "ellipsis.circle"
+        case .done: return "checkmark.circle.fill"
+        case .error: return "xmark.circle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .running: return .orange
+        case .done: return .green
+        case .error: return .red
+        }
+    }
+}
+
 struct AgentSession: Codable, Identifiable {
     let id: String
     let name: String
@@ -68,6 +123,9 @@ struct AgentSession: Codable, Identifiable {
     let pid: Int?
     let sourceProvider: String
     let tasks: [AgentTask]?
+    let recentActions: [AgentAction]?
+    let parentId: String?
+    let conversationPreview: [String]?
 }
 
 enum AgentType: String, Codable {

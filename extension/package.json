@@ -2,7 +2,7 @@
   "name": "agent-dashboard",
   "displayName": "Agent Dashboard",
   "description": "Real-time visual monitoring dashboard for AI coding agents — Copilot, Claude Code, and more",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "publisher": "amischreiber",
   "author": {
     "name": "Ami Schreiber",
@@ -84,6 +84,7 @@
           "default": {
             "vscode-chat-sessions": false,
             "copilot-extension": true,
+            "copilot-chat-sessions": true,
             "chat-tools-participants": true,
             "custom-workspace-agents": true,
             "terminal-processes": true,

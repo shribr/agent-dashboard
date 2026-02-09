@@ -13,6 +13,13 @@ interface AgentTask {
   activeForm?: string;
 }
 
+interface AgentAction {
+  tool: string;        // e.g. "Read", "Edit", "Bash", "Subagent"
+  detail: string;      // e.g. "menu.service.ts, lines 700-900"
+  timestamp: number;
+  status: 'running' | 'done' | 'error';
+}
+
 interface AgentSession {
   id: string;
   name: string;
@@ -34,6 +41,9 @@ interface AgentSession {
   pid?: number;
   sourceProvider: string;
   tasks?: AgentTask[];
+  recentActions?: AgentAction[];
+  parentId?: string;
+  conversationPreview?: string[];  // Recent conversation snippets for the detail panel
 }
 
 interface ActivityItem {
@@ -509,6 +519,616 @@ class CopilotExtensionProvider extends DataProvider {
   }
 }
 
+// ─── Provider: Copilot Chat Session Files ────────────────────────────────────
+
+class CopilotChatSessionProvider extends DataProvider {
+  readonly name = 'Copilot Chat Sessions';
+  readonly id = 'copilot-chat-sessions';
+
+  private context: vscode.ExtensionContext;
+
+  constructor(outputChannel: vscode.OutputChannel, context: vscode.ExtensionContext) {
+    super(outputChannel);
+    this.context = context;
+  }
+
+  protected async fetch(): Promise<void> {
+    this._agents = [];
+    this._activities = [];
+
+    // ── Find chat session files ──
+    // VS Code stores chat sessions as JSON files in workspaceStorage/<id>/chatSessions/
+    const sessionFiles = this.findChatSessionFiles();
+
+    if (sessionFiles.length === 0) {
+      this._state = 'connected';
+      this._message = 'No session files found. Check Output → Agent Dashboard for path details.';
+      return;
+    }
+
+    this._outputChannel.appendLine(`[${this.id}] Processing ${sessionFiles.length} session file(s)...`);
+    const now = Date.now();
+    // Use a generous 24-hour window — show sessions from the whole day
+    const RECENT_MS = 24 * 60 * 60 * 1000;
+    let skippedOld = 0;
+    let parsed = 0;
+    let errors = 0;
+
+    for (const filePath of sessionFiles) {
+      try {
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > RECENT_MS) { skippedOld++; continue; }
+
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        // Guard against very large files (> 5MB) that could slow down polling
+        if (raw.length > 5 * 1024 * 1024) {
+          this._outputChannel.appendLine(`[${this.id}] Skipping large file (${(raw.length/1024/1024).toFixed(1)}MB): ${filePath}`);
+          continue;
+        }
+
+        const data = JSON.parse(raw);
+        this.parseSessionData(data, filePath, stat.mtimeMs);
+        parsed++;
+      } catch (err: any) {
+        errors++;
+        this._outputChannel.appendLine(`[${this.id}] Error parsing ${filePath}: ${err?.message}`);
+      }
+    }
+
+    this._outputChannel.appendLine(`[${this.id}] Results: ${parsed} parsed, ${skippedOld} skipped (old), ${errors} errors → ${this._agents.length} agents`);
+
+    this._state = 'connected';
+    if (this._agents.length > 0) {
+      this._message = `${this._agents.length} session(s) with detailed activity (from ${parsed} files)`;
+    } else {
+      this._message = `Found ${sessionFiles.length} files (${parsed} recent) but no agent activity detected.`;
+    }
+  }
+
+  private findChatSessionFiles(): string[] {
+    const files: string[] = [];
+    const searchedPaths: string[] = [];
+
+    try {
+      // ── Build list of candidate User directories ──
+      // Primary: derive from our extension's globalStorageUri
+      const globalStoragePath = this.context.globalStorageUri.fsPath;
+      this._outputChannel.appendLine(`[${this.id}] globalStorageUri: ${globalStoragePath}`);
+      const primaryUserDir = path.resolve(globalStoragePath, '..', '..');
+      const userDirs = new Set<string>([primaryUserDir]);
+
+      // Fallback: explicit platform paths for stable + Insiders
+      const home = os.homedir();
+      if (process.platform === 'darwin') {
+        userDirs.add(path.join(home, 'Library', 'Application Support', 'Code', 'User'));
+        userDirs.add(path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User'));
+        userDirs.add(path.join(home, 'Library', 'Application Support', 'Cursor', 'User'));
+      } else if (process.platform === 'win32') {
+        const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+        userDirs.add(path.join(appData, 'Code', 'User'));
+        userDirs.add(path.join(appData, 'Code - Insiders', 'User'));
+      } else {
+        userDirs.add(path.join(home, '.config', 'Code', 'User'));
+        userDirs.add(path.join(home, '.config', 'Code - Insiders', 'User'));
+      }
+
+      for (const userDir of userDirs) {
+        const workspaceStorageDir = path.join(userDir, 'workspaceStorage');
+        if (!fs.existsSync(workspaceStorageDir)) {
+          this._outputChannel.appendLine(`[${this.id}] Not found: ${workspaceStorageDir}`);
+          continue;
+        }
+
+        this._outputChannel.appendLine(`[${this.id}] Scanning: ${workspaceStorageDir}`);
+        searchedPaths.push(workspaceStorageDir);
+        let foundInDir = 0;
+
+        const workspaceDirs = fs.readdirSync(workspaceStorageDir);
+        for (const wsDir of workspaceDirs) {
+          const wsPath = path.join(workspaceStorageDir, wsDir);
+
+          // Path 1: chatSessions/ subdirectory (VS Code core chat storage)
+          const chatSessionsDir = path.join(wsPath, 'chatSessions');
+          if (fs.existsSync(chatSessionsDir)) {
+            try {
+              const sessionFiles = fs.readdirSync(chatSessionsDir)
+                .filter(f => f.endsWith('.json'))
+                .map(f => path.join(chatSessionsDir, f));
+
+              const withStats = sessionFiles.map(f => {
+                try { return { path: f, mtime: fs.statSync(f).mtimeMs }; }
+                catch { return null; }
+              }).filter(Boolean) as { path: string; mtime: number }[];
+
+              withStats.sort((a, b) => b.mtime - a.mtime);
+              const taken = withStats.slice(0, 10).map(f => f.path);
+              files.push(...taken);
+              foundInDir += taken.length;
+            } catch { /* skip */ }
+          }
+
+          // Path 2: GitHub.copilot-chat/ subdirectory (Copilot extension data)
+          const copilotChatDir = path.join(wsPath, 'GitHub.copilot-chat');
+          if (fs.existsSync(copilotChatDir)) {
+            try {
+              const copilotFiles = this.findJsonRecursive(copilotChatDir, 2);
+              files.push(...copilotFiles);
+              foundInDir += copilotFiles.length;
+            } catch { /* skip */ }
+          }
+
+          // Path 3: github.copilot-chat/ (lowercase variant)
+          const copilotChatDirLower = path.join(wsPath, 'github.copilot-chat');
+          if (copilotChatDirLower !== copilotChatDir && fs.existsSync(copilotChatDirLower)) {
+            try {
+              const copilotFiles = this.findJsonRecursive(copilotChatDirLower, 2);
+              files.push(...copilotFiles);
+              foundInDir += copilotFiles.length;
+            } catch { /* skip */ }
+          }
+        }
+
+        this._outputChannel.appendLine(`[${this.id}]   → Found ${foundInDir} session file(s) across ${workspaceDirs.length} workspace(s)`);
+
+        // Also check global Copilot Chat storage
+        for (const copilotDirName of ['github.copilot-chat', 'GitHub.copilot-chat']) {
+          const copilotGlobalStorage = path.join(userDir, 'globalStorage', copilotDirName);
+          if (fs.existsSync(copilotGlobalStorage)) {
+            try {
+              const copilotFiles = this.findJsonRecursive(copilotGlobalStorage, 3);
+              files.push(...copilotFiles);
+              this._outputChannel.appendLine(`[${this.id}]   → Found ${copilotFiles.length} file(s) in globalStorage/${copilotDirName}/`);
+            } catch { /* skip */ }
+          }
+        }
+      }
+
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Error scanning storage: ${err?.message}`);
+    }
+
+    // Deduplicate
+    const uniqueFiles = [...new Set(files)];
+    this._outputChannel.appendLine(`[${this.id}] Total: ${uniqueFiles.length} unique session files found (searched ${searchedPaths.length} storage root(s))`);
+    return uniqueFiles;
+  }
+
+  private findJsonRecursive(dir: string, maxDepth: number): string[] {
+    if (maxDepth <= 0) return [];
+    const results: string[] = [];
+
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name.endsWith('.json') && !entry.name.startsWith('.')) {
+          results.push(full);
+        } else if (entry.isDirectory() && maxDepth > 1) {
+          results.push(...this.findJsonRecursive(full, maxDepth - 1));
+        }
+      }
+    } catch { /* permission denied etc */ }
+
+    return results;
+  }
+
+  private parseSessionData(data: any, filePath: string, mtime: number): void {
+    const sessionId = path.basename(filePath, '.json');
+
+    // ── Copilot Chat primary format: { requests: [...] } ──
+    const requests = data.requests || data.turns || data.messages || data.exchanges
+      || data.history || data.conversation || (Array.isArray(data) ? data : []);
+
+    if (!Array.isArray(requests) || requests.length === 0) {
+      if (data && typeof data === 'object') {
+        const topKeys = Object.keys(data).slice(0, 10).join(', ');
+        this._outputChannel.appendLine(`[${this.id}] Session ${sessionId.substring(0, 12)}: 0 requests. Keys: [${topKeys}]`);
+      }
+      return;
+    }
+
+    this._outputChannel.appendLine(`[${this.id}] Parsing session ${sessionId.substring(0, 12)}: ${requests.length} turns, title="${data.title || '(none)'}"`);
+
+
+    const recentActions: AgentAction[] = [];
+    const filesAccessed = new Set<string>();
+    const toolsUsed = new Set<string>();
+    const subagents: { id: string; name: string; task: string; actions: AgentAction[]; status: string }[] = [];
+    let currentSubagent: typeof subagents[0] | null = null;
+    let lastUserMessage = '';
+    const conversationSnippets: string[] = [];
+
+    for (const req of requests) {
+      try {
+        // ── Extract user prompt ──
+        // Copilot Chat format: req.prompt is a string
+        const prompt = typeof req.prompt === 'string' ? req.prompt
+          : (req.prompt?.text || req.prompt?.value || req.message?.text || req.message?.value
+            || (typeof req.message === 'string' ? req.message : '')
+            || req.text || req.query || req.input || '');
+        if (typeof prompt === 'string' && prompt.length > 0) {
+          lastUserMessage = prompt.substring(0, 300);
+          if (conversationSnippets.length < 10) {
+            conversationSnippets.push('👤 ' + prompt.substring(0, 150));
+          }
+        }
+
+        // ── Parse response parts ──
+        // Copilot Chat format: req.response is an ARRAY of typed parts:
+        //   { type: "markdown", markdown: { value: "..." } }
+        //   { type: "inlineReference", inlineReference: { name, uri, kind } }
+        //   { type: "contentReference", contentReference: { name, uri, range } }
+        //   { type: "toolCall", toolCall: { id, toolName, toolInput, toolResult } }
+        //   { type: "progressMessage", progressMessage: { message } }
+        const responseParts = Array.isArray(req.response) ? req.response : [];
+
+        // Collect markdown text from response
+        let responseText = '';
+        for (const part of responseParts) {
+          try {
+            if (!part || !part.type) continue;
+
+            // Markdown content — the actual assistant response text
+            if (part.type === 'markdown' && part.markdown?.value) {
+              responseText += part.markdown.value + '\n';
+            }
+
+            // Tool calls — the actual tool invocations in agent mode
+            if (part.type === 'toolCall' && part.toolCall) {
+              const tc = part.toolCall;
+              const toolName = this.normalizeToolName(tc.toolName || tc.name || 'Tool');
+              const toolInput = tc.toolInput || tc.input || tc.arguments || {};
+              const toolResult = tc.toolResult;
+              const isError = toolResult?.exitCode ? toolResult.exitCode !== 0 : false;
+
+              const detail = this.formatToolDetail(toolName, toolInput);
+              const action: AgentAction = {
+                tool: toolName,
+                detail,
+                timestamp: mtime,
+                status: isError ? 'error' : 'done'
+              };
+              recentActions.push(action);
+              toolsUsed.add(toolName);
+
+              // Extract file path from tool input
+              const fp = toolInput.file_path || toolInput.filePath || toolInput.path || toolInput.uri || '';
+              if (typeof fp === 'string' && fp.length > 0) {
+                filesAccessed.add(path.basename(fp));
+              }
+
+              // Detect subagent spawns
+              if (toolName === 'Subagent' || toolName === 'Task' || detail.toLowerCase().includes('subagent')) {
+                const subId = `sub-${sessionId}-${subagents.length}`;
+                currentSubagent = {
+                  id: subId,
+                  name: detail.substring(0, 80) || `Subagent ${subagents.length + 1}`,
+                  task: detail,
+                  actions: [],
+                  status: 'done'
+                };
+                subagents.push(currentSubagent);
+              }
+
+              if (currentSubagent) {
+                currentSubagent.actions.push(action);
+              }
+
+              // Add to conversation snippets
+              if (conversationSnippets.length < 20) {
+                const statusEmoji = isError ? '❌' : '✅';
+                conversationSnippets.push(`🔧 ${toolName}: ${detail.substring(0, 100)} ${statusEmoji}`);
+              }
+            }
+
+            // Inline file references
+            if (part.type === 'inlineReference' && part.inlineReference) {
+              const ref = part.inlineReference;
+              const uri = ref.uri?.path || ref.uri?.fsPath || ref.uri || '';
+              const name = ref.name || (typeof uri === 'string' ? path.basename(uri) : '');
+              if (name && name.includes('.')) {
+                filesAccessed.add(name);
+                recentActions.push({ tool: 'Read', detail: name, timestamp: mtime, status: 'done' });
+                toolsUsed.add('Read');
+              }
+            }
+
+            // Content references (file with range)
+            if (part.type === 'contentReference' && part.contentReference) {
+              const cref = part.contentReference;
+              const uri = cref.uri?.path || cref.uri?.fsPath || cref.uri || '';
+              const name = cref.name || (typeof uri === 'string' ? path.basename(uri) : '');
+              if (name && name.includes('.')) {
+                filesAccessed.add(name);
+                let detail = name;
+                if (cref.range) {
+                  const startLine = cref.range.start?.line ?? cref.range.startLineNumber;
+                  const endLine = cref.range.end?.line ?? cref.range.endLineNumber;
+                  if (startLine != null) {
+                    detail = `${name}, lines ${startLine}${endLine != null ? '-' + endLine : ''}`;
+                  }
+                }
+                recentActions.push({ tool: 'Read', detail, timestamp: mtime, status: 'done' });
+                toolsUsed.add('Read');
+              }
+            }
+
+            // Progress messages (agent thinking/status updates)
+            if (part.type === 'progressMessage' && part.progressMessage?.message) {
+              if (conversationSnippets.length < 20) {
+                conversationSnippets.push('⏳ ' + part.progressMessage.message.substring(0, 120));
+              }
+            }
+
+          } catch { /* skip individual part */ }
+        }
+
+        // Add response text snippet to conversation
+        if (responseText.length > 0 && conversationSnippets.length < 20) {
+          // Truncate and clean up for preview
+          const cleaned = responseText.replace(/```[\s\S]*?```/g, '[code block]').replace(/\n{2,}/g, '\n').trim();
+          conversationSnippets.push('🤖 ' + cleaned.substring(0, 200));
+        }
+
+        // ── Also handle the older format where response is an object, not array ──
+        if (!Array.isArray(req.response) && req.response) {
+          const resp = req.response;
+          // Object-style response with value array
+          this.extractFromObjectResponse(resp, mtime, recentActions, filesAccessed, toolsUsed, conversationSnippets, subagents, sessionId, currentSubagent);
+        }
+
+        // ── Check result object too ──
+        if (req.result) {
+          const resultMsg = req.result.message;
+          if (Array.isArray(resultMsg)) {
+            for (const part of resultMsg) {
+              if (part.kind === 'inlineReference' && part.inlineReference?.uri) {
+                const uri = part.inlineReference.uri.path || part.inlineReference.uri;
+                const fileName = typeof uri === 'string' ? path.basename(uri) : '';
+                if (fileName && fileName.includes('.')) {
+                  filesAccessed.add(fileName);
+                }
+              }
+            }
+          }
+        }
+
+        // ── Parse tool references from markdown text ──
+        if (responseText.length > 0) {
+          this.extractToolRefsFromText(responseText, mtime, recentActions, filesAccessed, toolsUsed, subagents, sessionId, currentSubagent);
+        }
+
+      } catch { /* skip individual request */ }
+    }
+
+    if (requests.length === 0) return;
+
+    // Determine if session is active (modified recently)
+    const now = Date.now();
+    const ageMs = now - mtime;
+    const isActive = ageMs < 5 * 60 * 1000; // Active if modified in last 5 min
+
+    // Create main session agent
+    this._agents.push({
+      id: `copilot-session-${sessionId.substring(0, 12)}`,
+      name: data.title || `Copilot Chat ${sessionId.substring(0, 8)}`,
+      type: 'copilot',
+      typeLabel: subagents.length > 0 ? 'Agent Swarm' : 'Copilot Chat',
+      model: data.model || '—',
+      status: isActive ? 'running' : 'done',
+      task: lastUserMessage || data.title || 'Chat session',
+      tokens: data.tokenCount || data.totalTokens || 0,
+      startTime: data.createdAt ? new Date(data.createdAt).getTime() : mtime,
+      elapsed: '—',
+      progress: isActive ? 0 : 100,
+      progressLabel: isActive
+        ? (recentActions.length > 0 ? recentActions[recentActions.length - 1].detail : 'Active')
+        : `${recentActions.length} tool calls`,
+      tools: Array.from(toolsUsed),
+      activeTool: isActive && recentActions.length > 0
+        ? `${recentActions[recentActions.length - 1].tool}: ${recentActions[recentActions.length - 1].detail}`
+        : null,
+      files: Array.from(filesAccessed).slice(0, 20),
+      location: 'local',
+      sourceProvider: this.id,
+      recentActions: recentActions.slice(-30), // Last 30 actions
+      conversationPreview: conversationSnippets.slice(-15), // Last 15 conversation lines
+    });
+
+    // Create entries for each detected subagent
+    for (const sub of subagents) {
+      const subFiles = new Set<string>();
+      const subTools = new Set<string>();
+      for (const a of sub.actions) {
+        subTools.add(a.tool);
+        if (a.detail.includes('.')) {
+          // Try to extract filename from detail
+          const fileMatch = a.detail.match(/([a-zA-Z0-9_.-]+\.\w{1,6})/);
+          if (fileMatch) subFiles.add(fileMatch[1]);
+        }
+      }
+
+      this._agents.push({
+        id: `copilot-${sub.id}`,
+        name: sub.name,
+        type: 'copilot',
+        typeLabel: 'Subagent',
+        model: data.model || '—',
+        status: isActive ? 'running' : 'done',
+        task: sub.task,
+        tokens: 0,
+        startTime: mtime,
+        elapsed: '—',
+        progress: 0,
+        progressLabel: `${sub.actions.length} actions`,
+        tools: Array.from(subTools),
+        activeTool: sub.actions.length > 0 ? sub.actions[sub.actions.length - 1].detail : null,
+        files: Array.from(subFiles),
+        location: 'local',
+        sourceProvider: this.id,
+        recentActions: sub.actions.slice(-20),
+        parentId: `copilot-session-${sessionId.substring(0, 12)}`,
+      });
+    }
+
+    // Generate activity items for tool calls
+    for (const action of recentActions.slice(-10)) {
+      this._activities.push({
+        agent: data.title || `Copilot ${sessionId.substring(0, 8)}`,
+        desc: `${action.tool}: ${action.detail}`,
+        type: action.tool === 'Edit' || action.tool === 'Write' ? 'file_edit' :
+              action.tool === 'Bash' || action.tool === 'Command' ? 'command' :
+              action.tool === 'Subagent' ? 'start' : 'tool_use',
+        timestamp: action.timestamp,
+        timeLabel: ''
+      });
+    }
+  }
+
+  /**
+   * Extract tool calls and content from an object-shaped response (older format / fallback)
+   */
+  private extractFromObjectResponse(
+    resp: any, mtime: number,
+    recentActions: AgentAction[], filesAccessed: Set<string>, toolsUsed: Set<string>,
+    conversationSnippets: string[],
+    subagents: { id: string; name: string; task: string; actions: AgentAction[]; status: string }[],
+    sessionId: string, currentSubagent: typeof subagents[0] | null
+  ): void {
+    // Object response with value array (legacy format)
+    const blocks = resp.value || resp.parts || resp.content || [];
+    if (Array.isArray(blocks)) {
+      for (const block of blocks) {
+        try {
+          if (block.kind === 'toolCall' || block.type === 'tool_use' || block.toolCallId) {
+            const toolName = this.normalizeToolName(block.toolName || block.tool || block.name || 'Tool');
+            const input = block.input || block.arguments || block.toolInput || {};
+            const detail = this.formatToolDetail(toolName, input);
+            recentActions.push({ tool: toolName, detail, timestamp: mtime, status: 'done' });
+            toolsUsed.add(toolName);
+          }
+          if ((block.kind === 'inlineReference' || block.type === 'inlineReference') && block.inlineReference?.uri) {
+            const uri = block.inlineReference.uri.path || block.inlineReference.uri.fsPath || block.inlineReference.uri;
+            const fileName = typeof uri === 'string' ? path.basename(uri) : '';
+            if (fileName && fileName.includes('.')) {
+              filesAccessed.add(fileName);
+            }
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    // Text content
+    const text = typeof resp.value === 'string' ? resp.value : (resp.text || resp.message || '');
+    if (typeof text === 'string' && text.length > 0 && conversationSnippets.length < 20) {
+      conversationSnippets.push('🤖 ' + text.substring(0, 200));
+    }
+
+    // Content references
+    if (resp.contentReferences && Array.isArray(resp.contentReferences)) {
+      for (const ref of resp.contentReferences) {
+        const uri = ref.uri?.path || ref.uri?.fsPath || ref.uri || '';
+        const fileName = typeof uri === 'string' ? path.basename(uri) : '';
+        if (fileName && fileName.includes('.')) {
+          filesAccessed.add(fileName);
+        }
+      }
+    }
+
+    // Agent tool results
+    if (resp.agentToolResults && Array.isArray(resp.agentToolResults)) {
+      for (const result of resp.agentToolResults) {
+        const tName = this.normalizeToolName(result.toolName || 'Tool');
+        const detail = this.formatToolDetail(tName, result.input || result);
+        recentActions.push({ tool: tName, detail, timestamp: mtime, status: 'done' });
+        toolsUsed.add(tName);
+      }
+    }
+  }
+
+  /**
+   * Parse tool-like references from response markdown text
+   */
+  private extractToolRefsFromText(
+    text: string, mtime: number,
+    recentActions: AgentAction[], filesAccessed: Set<string>, toolsUsed: Set<string>,
+    subagents: { id: string; name: string; task: string; actions: AgentAction[]; status: string }[],
+    sessionId: string, currentSubagent: typeof subagents[0] | null
+  ): void {
+    const addPath = path;  // closure reference
+    // "Reading <filename>" / "Read <filename>, lines X-Y"
+    const readMatches = text.matchAll(/(?:Reading|Read)\s+[`"]?([a-zA-Z0-9_/.-]+\.\w{1,6})[`"]?(?:,?\s*lines?\s+(\d+)(?:\s*[-\u2013to]+\s*(\d+))?)?/gi);
+    for (const m of readMatches) {
+      const fn = addPath.basename(m[1]);
+      const detail = m[2] ? `${fn}, lines ${m[2]}${m[3] ? '-' + m[3] : ''}` : fn;
+      if (!recentActions.some(a => a.detail === detail)) {
+        recentActions.push({ tool: 'Read', detail, timestamp: mtime, status: 'done' });
+        toolsUsed.add('Read');
+        filesAccessed.add(fn);
+      }
+    }
+    // "Editing/Wrote <filename>"
+    const editMatches = text.matchAll(/(?:Editing|Edit(?:ed)?|Writing|Wrote)\s+[`"]?([a-zA-Z0-9_/.-]+\.\w{1,6})[`"]?/gi);
+    for (const m of editMatches) {
+      const fn = addPath.basename(m[1]);
+      if (!recentActions.some(a => a.detail === fn && a.tool === 'Edit')) {
+        recentActions.push({ tool: 'Edit', detail: fn, timestamp: mtime, status: 'done' });
+        toolsUsed.add('Edit');
+        filesAccessed.add(fn);
+      }
+    }
+    // "Subagent: Agent XX - name"
+    const subMatches = text.matchAll(/Subagent:?\s*(?:Agent\s*)?(\d+)?[\s:\u2013-]+(.+?)(?:\n|$)/gi);
+    for (const m of subMatches) {
+      const name = m[2]?.trim() || `Agent ${m[1] || '?'}`;
+      recentActions.push({ tool: 'Subagent', detail: `Agent ${m[1] || ''} \u2014 ${name}`, timestamp: mtime, status: 'done' });
+      toolsUsed.add('Subagent');
+    }
+    // "Running command: ..."
+    const cmdMatches = text.matchAll(/(?:Running|Ran|Executing)\s+(?:command:?\s*)?[`"](.+?)[`"]/gi);
+    for (const m of cmdMatches) {
+      recentActions.push({ tool: 'Bash', detail: m[1].substring(0, 80), timestamp: mtime, status: 'done' });
+      toolsUsed.add('Bash');
+    }
+  }
+
+  /**
+   * Format a tool call detail string from the tool input object
+   */
+  private formatToolDetail(toolName: string, input: any): string {
+    if (!input || typeof input !== 'object') return typeof input === 'string' ? input.substring(0, 80) : toolName;
+
+    const fp = input.file_path || input.filePath || input.path || input.uri;
+    if (fp && typeof fp === 'string') {
+      const fileName = path.basename(fp);
+      if (input.offset || input.limit || input.lineStart) {
+        const start = input.offset || input.lineStart || 1;
+        const end = input.limit ? start + input.limit : (input.lineEnd || '');
+        return `${fileName}, lines ${start}${end ? '-' + end : ''}`;
+      }
+      return fileName;
+    }
+    if (input.command) return String(input.command).substring(0, 80);
+    if (input.old_string || input.new_string) return (fp ? path.basename(fp) : '') || 'file edit';
+    if (input.prompt || input.description) return String(input.description || input.prompt).substring(0, 80);
+    if (typeof input === 'string') return input.substring(0, 80);
+
+    try { return JSON.stringify(input).substring(0, 60); } catch { return toolName; }
+  }
+
+  private normalizeToolName(name: string): string {
+    const n = (name || '').toLowerCase();
+    if (n.includes('read') || n.includes('get_file') || n.includes('view_file')) return 'Read';
+    if (n.includes('edit') || n.includes('replace') || n.includes('patch')) return 'Edit';
+    if (n.includes('write') || n.includes('create_file') || n.includes('save')) return 'Write';
+    if (n.includes('bash') || n.includes('shell') || n.includes('exec') || n.includes('terminal') || n.includes('run_command')) return 'Bash';
+    if (n.includes('search') || n.includes('grep') || n.includes('find') || n.includes('glob')) return 'Search';
+    if (n.includes('subagent') || n.includes('task') || n.includes('delegate') || n.includes('spawn')) return 'Subagent';
+    if (n.includes('list') || n.includes('ls') || n.includes('dir')) return 'List';
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+}
+
 // ─── Provider: Terminal Process Monitor ──────────────────────────────────────
 
 class TerminalProcessProvider extends DataProvider {
@@ -895,12 +1515,161 @@ class ClaudeDesktopTodosProvider extends DataProvider {
       }
     }
 
+    // ── Also scan Claude Code JSONL sessions from ~/.claude/projects/ ──
+    const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+    if (fs.existsSync(projectsDir)) {
+      try {
+        const projectDirs = fs.readdirSync(projectsDir);
+        for (const projDir of projectDirs) {
+          const projPath = path.join(projectsDir, projDir);
+          try {
+            const stat2 = fs.statSync(projPath);
+            if (!stat2.isDirectory()) continue;
+
+            const jsonlFiles = fs.readdirSync(projPath)
+              .filter(f => f.endsWith('.jsonl'))
+              .map(f => ({ name: f, path: path.join(projPath, f) }));
+
+            for (const jf of jsonlFiles) {
+              try {
+                const jstat = fs.statSync(jf.path);
+                const age = now - jstat.mtimeMs;
+                if (age > 24 * 60 * 60 * 1000) continue; // Last 24 hours
+
+                // Read JSONL (one JSON object per line)
+                const raw = fs.readFileSync(jf.path, 'utf-8');
+                if (raw.length > 5 * 1024 * 1024) continue; // Skip files > 5MB
+
+                const lines = raw.split('\n').filter(l => l.trim().length > 0);
+                if (lines.length === 0) continue;
+
+                const sessionId = path.basename(jf.name, '.jsonl').substring(0, 12);
+                const actions: AgentAction[] = [];
+                const files2 = new Set<string>();
+                const tools2 = new Set<string>();
+                const convoSnippets: string[] = [];
+                let lastTask = '';
+                let totalInputTokens = 0;
+                let totalOutputTokens = 0;
+
+                for (const line of lines) {
+                  try {
+                    const msg = JSON.parse(line);
+                    const content = msg.message?.content;
+                    if (!Array.isArray(content)) continue;
+
+                    for (const block of content) {
+                      // User text
+                      if (msg.type === 'user' && block.type === 'text' && block.text) {
+                        lastTask = block.text.substring(0, 300);
+                        if (convoSnippets.length < 15) {
+                          convoSnippets.push('\uD83D\uDC64 ' + block.text.substring(0, 150));
+                        }
+                      }
+                      // Assistant text
+                      if (msg.type === 'assistant' && block.type === 'text' && block.text) {
+                        if (convoSnippets.length < 15) {
+                          convoSnippets.push('\uD83E\uDD16 ' + block.text.substring(0, 200));
+                        }
+                      }
+                      // Tool use
+                      if (block.type === 'tool_use') {
+                        const toolName = this.normalizeClaudeToolName(block.name || 'Tool');
+                        const input = block.input || {};
+                        let detail = '';
+                        const fp = input.file_path || input.filePath || '';
+                        if (fp) {
+                          const fn = path.basename(fp);
+                          files2.add(fn);
+                          detail = input.offset ? `${fn}, lines ${input.offset}` : fn;
+                        } else if (input.command) {
+                          detail = String(input.command).substring(0, 80);
+                        } else if (input.pattern) {
+                          detail = `pattern: ${input.pattern}`;
+                        } else if (input.query) {
+                          detail = String(input.query).substring(0, 80);
+                        } else {
+                          detail = toolName;
+                        }
+                        actions.push({ tool: toolName, detail, timestamp: jstat.mtimeMs, status: 'done' });
+                        tools2.add(toolName);
+                        if (convoSnippets.length < 20) {
+                          convoSnippets.push('\uD83D\uDD27 ' + toolName + ': ' + detail.substring(0, 100));
+                        }
+                      }
+                      // Tool result (check for errors)
+                      if (block.type === 'tool_result' && block.is_error && actions.length > 0) {
+                        actions[actions.length - 1].status = 'error';
+                      }
+                    }
+
+                    // Token usage
+                    if (msg.usage) {
+                      totalInputTokens += msg.usage.input_tokens || 0;
+                      totalOutputTokens += msg.usage.output_tokens || 0;
+                    }
+                  } catch { /* skip line */ }
+                }
+
+                if (actions.length === 0 && lines.length < 2) continue;
+
+                const isActive2 = (now - jstat.mtimeMs) < 5 * 60 * 1000;
+                const totalTokens = totalInputTokens + totalOutputTokens;
+
+                this._agents.push({
+                  id: `claude-code-${sessionId}`,
+                  name: `Claude Code ${sessionId}`,
+                  type: 'claude',
+                  typeLabel: 'Claude Code',
+                  model: 'Claude',
+                  status: isActive2 ? 'running' : 'done',
+                  task: lastTask || 'Claude Code session',
+                  tokens: totalTokens,
+                  startTime: jstat.birthtimeMs || jstat.mtimeMs,
+                  elapsed: this.formatElapsed(now - (jstat.birthtimeMs || jstat.mtimeMs)),
+                  progress: isActive2 ? 0 : 100,
+                  progressLabel: isActive2 ? (actions.length > 0 ? actions[actions.length - 1].detail : 'Active') : `${actions.length} tool calls`,
+                  tools: Array.from(tools2),
+                  activeTool: isActive2 && actions.length > 0 ? actions[actions.length - 1].detail : null,
+                  files: Array.from(files2).slice(0, 20),
+                  location: 'local',
+                  sourceProvider: this.id,
+                  recentActions: actions.slice(-30),
+                  conversationPreview: convoSnippets.slice(-15),
+                });
+
+                if (isActive2) activeCount++;
+                recentCount++;
+              } catch { /* skip file */ }
+            }
+          } catch { /* skip project dir */ }
+        }
+      } catch (err: any) {
+        this._outputChannel.appendLine(`[${this.id}] Error scanning Claude Code projects: ${err?.message}`);
+      }
+    }
+
     this._state = 'connected';
     this._message = activeCount > 0
       ? `${activeCount} active session(s), ${recentCount} recent`
       : recentCount > 0
         ? `${recentCount} recent session(s), none currently active`
-        : 'No active Claude Desktop sessions.';
+        : 'No active Claude sessions.';
+  }
+
+  private normalizeClaudeToolName(name: string): string {
+    const n = (name || '').toLowerCase();
+    if (n === 'read' || n === 'view') return 'Read';
+    if (n === 'edit' || n === 'str_replace_editor') return 'Edit';
+    if (n === 'write' || n === 'create') return 'Write';
+    if (n === 'bash' || n === 'execute' || n === 'shell') return 'Bash';
+    if (n === 'glob' || n === 'find') return 'Search';
+    if (n === 'grep' || n === 'search') return 'Search';
+    if (n === 'task' || n === 'dispatch_agent') return 'Subagent';
+    if (n === 'todowrite' || n === 'todo') return 'Todo';
+    if (n === 'ls' || n === 'list') return 'List';
+    if (n === 'webfetch' || n === 'websearch') return 'Web';
+    return name.charAt(0).toUpperCase() + name.slice(1);
   }
 }
 
@@ -1536,6 +2305,7 @@ class DashboardProvider {
     this.allProviders = [
       { provider: new VSCodeChatSessionsProvider(this.outputChannel), group: 'copilot' },
       { provider: new CopilotExtensionProvider(this.outputChannel), group: 'copilot' },
+      { provider: new CopilotChatSessionProvider(this.outputChannel, context), group: 'copilot' },
       { provider: new ChatToolsParticipantsProvider(this.outputChannel), group: 'copilot' },
       { provider: new CustomAgentsProvider(this.outputChannel), group: 'both' },
       { provider: new TerminalProcessProvider(this.outputChannel), group: 'both' },
@@ -1845,7 +2615,7 @@ class DashboardProvider {
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.9.0', uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', version: '0.9.1', uptime: process.uptime() }));
         return;
       }
 
@@ -2034,6 +2804,16 @@ function getWebviewContent(webview: vscode.Webview): string {
   .detail-row { display:flex; gap:12px; margin-bottom:6px; font-size:10px; }
   .detail-label { color:var(--text-dim); min-width:60px; }
   .detail-value { color:var(--text); }
+
+  /* Activity Timeline */
+  .action-timeline { display:flex; flex-direction:column; gap:1px; }
+  .action-item { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:4px; font-size:10px; transition:background 0.1s; border-left:2px solid var(--border); }
+  .action-item:hover { background:var(--surface2); }
+  .action-icon { width:16px; text-align:center; font-size:11px; flex-shrink:0; }
+  .action-body { flex:1; min-width:0; display:flex; gap:6px; align-items:baseline; }
+  .action-tool { font-weight:600; font-size:9px; text-transform:uppercase; letter-spacing:0.3px; flex-shrink:0; }
+  .action-detail { color:var(--text-dim); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .action-status { font-size:10px; flex-shrink:0; }
   .file-list { margin-top:6px; }
   .file-item { font-size:10px; color:var(--text-dim); padding:2px 0; display:flex; align-items:center; gap:4px; }
   .tag { font-size:8px; padding:2px 6px; border-radius:3px; font-weight:600; text-transform:uppercase; letter-spacing:0.3px; }
@@ -2129,7 +2909,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.9.0</span></h1>
+      <h1>Agent Dashboard <span>v0.9.1</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -2178,6 +2958,10 @@ function getWebviewContent(webview: vscode.Webview): string {
 </div>
 <script nonce="${nonce}">
 (function() {
+  // Global error handler — display errors visibly in the webview
+  window.onerror = function(msg, url, line, col, err) {
+    document.body.innerHTML = '<div style="padding:30px;color:#e74c3c;font-family:monospace;"><h2 style="color:#e74c3c;">Agent Dashboard Error</h2><p>'+msg+'</p><p>Line: '+line+', Col: '+col+'</p><pre style="background:#1a1d27;padding:12px;border-radius:6px;overflow:auto;color:#e4e6f0;font-size:11px;">'+(err&&err.stack?err.stack:'No stack trace')+'</pre><p style="color:#8b8fa3;font-size:11px;">Please check Developer Tools (Ctrl+Shift+I) for more details.</p></div>';
+  };
   var vscode = acquireVsCodeApi();
   function send(cmd, data) { vscode.postMessage(Object.assign({ command: cmd }, data || {})); }
   function fmt(n) { return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':String(n); }
@@ -2243,6 +3027,15 @@ function getWebviewContent(webview: vscode.Webview): string {
   // Close detail panel
   document.getElementById('detail-panel-close').addEventListener('click', function() { closeDetailPanel(); });
   document.getElementById('detail-overlay').addEventListener('click', function() { closeDetailPanel(); });
+
+  // Parent link click in detail panel
+  document.getElementById('detail-panel-body').addEventListener('click', function(e) {
+    var parentLink = e.target.closest('.parent-link');
+    if (parentLink) {
+      var parentId = parentLink.getAttribute('data-parent-id');
+      if (parentId) openDetailPanel(parentId);
+    }
+  });
 
   var activePanelAgentId = null;
 
@@ -2312,6 +3105,65 @@ function getWebviewContent(webview: vscode.Webview): string {
         html += '<span style="font-size:9px;padding:2px 6px;background:var(--surface2);border-radius:3px;color:var(--text-dim);">'+agent.tools[tl]+'</span>';
       }
       html += '</div>';
+      html += '</div>';
+    }
+
+    // Activity Timeline (recentActions)
+    var actions = agent.recentActions || [];
+    if (actions.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Activity Timeline ('+actions.length+')</div>';
+      html += '<div class="action-timeline">';
+      // Show most recent first
+      var showActions = actions.slice().reverse().slice(0, 20);
+      var toolIcons = { Read:'&#128196;', Edit:'&#9998;', Write:'&#128221;', Bash:'&#9881;', Search:'&#128269;', Subagent:'&#9654;', List:'&#128194;' };
+      var toolColors = { Read:'var(--blue)', Edit:'var(--orange)', Write:'var(--green)', Bash:'var(--cyan)', Search:'var(--accent)', Subagent:'var(--yellow)', List:'var(--text-dim)' };
+      for (var ai = 0; ai < showActions.length; ai++) {
+        var act = showActions[ai];
+        var tIcon = toolIcons[act.tool] || '&#9679;';
+        var tColor = toolColors[act.tool] || 'var(--text-dim)';
+        var statusIcon = act.status === 'done' ? '&#10003;' : act.status === 'error' ? '&#10007;' : '&#8987;';
+        var statusColor = act.status === 'done' ? 'var(--green)' : act.status === 'error' ? 'var(--red)' : 'var(--orange)';
+        html += '<div class="action-item">';
+        html += '<div class="action-icon" style="color:'+tColor+'">'+tIcon+'</div>';
+        html += '<div class="action-body">';
+        html += '<span class="action-tool" style="color:'+tColor+'">'+act.tool+'</span>';
+        html += '<span class="action-detail">'+act.detail+'</span>';
+        html += '</div>';
+        html += '<div class="action-status" style="color:'+statusColor+'">'+statusIcon+'</div>';
+        html += '</div>';
+      }
+      if (actions.length > 20) {
+        html += '<div style="text-align:center;font-size:9px;color:var(--text-dim);padding:4px 0;">+ '+(actions.length - 20)+' earlier actions</div>';
+      }
+      html += '</div>';
+      html += '</div>';
+    }
+
+    // Conversation Preview (human-readable chat content)
+    var convo = agent.conversationPreview || [];
+    if (convo.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Conversation Preview ('+convo.length+' entries)</div>';
+      html += '<div style="display:flex;flex-direction:column;gap:3px;">';
+      for (var ci = 0; ci < convo.length; ci++) {
+        var line = convo[ci];
+        var bgColor = 'transparent';
+        var borderColor = 'var(--border)';
+        if (line.indexOf('\uD83D\uDC64') === 0) { bgColor = 'rgba(108,92,231,0.06)'; borderColor = 'var(--accent)'; }
+        else if (line.indexOf('\uD83E\uDD16') === 0) { bgColor = 'rgba(0,184,148,0.06)'; borderColor = 'var(--green)'; }
+        else if (line.indexOf('\uD83D\uDD27') === 0) { bgColor = 'rgba(0,206,201,0.06)'; borderColor = 'var(--cyan)'; }
+        else if (line.indexOf('\u23F3') === 0) { bgColor = 'rgba(243,156,18,0.06)'; borderColor = 'var(--orange)'; }
+        html += '<div style="font-size:10px;padding:4px 6px;background:'+bgColor+';border-left:2px solid '+borderColor+';border-radius:2px;word-break:break-word;line-height:1.4;color:var(--text);">'+line+'</div>';
+      }
+      html += '</div>';
+      html += '</div>';
+    }
+
+    // Parent/subagent relationship
+    if (agent.parentId) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-row"><span class="detail-label">Parent</span><span class="detail-value parent-link" style="color:var(--accent);cursor:pointer;" data-parent-id="'+agent.parentId+'">&#8593; View parent agent</span></div>';
       html += '</div>';
     }
 
@@ -2461,6 +3313,21 @@ function getWebviewContent(webview: vscode.Webview): string {
         detailsHtml += '</div>';
       }
 
+      // Compact recent actions in inline view
+      var inlineActions = a.recentActions || [];
+      if (inlineActions.length > 0) {
+        var recent5 = inlineActions.slice(-5).reverse();
+        detailsHtml += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Recent Activity</div>';
+        var tIcons = { Read:'&#128196;', Edit:'&#9998;', Write:'&#128221;', Bash:'&#9881;', Search:'&#128269;', Subagent:'&#9654;' };
+        for (var ra = 0; ra < recent5.length; ra++) {
+          var ract = recent5[ra];
+          detailsHtml += '<div style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:9px;"><span>'+(tIcons[ract.tool]||'&#9679;')+'</span><span style="font-weight:600;opacity:0.7;">'+ract.tool+'</span><span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+ract.detail+'</span></div>';
+        }
+        if (inlineActions.length > 5) {
+          detailsHtml += '<div style="font-size:8px;color:var(--text-dim);opacity:0.6;padding-top:2px;">+ '+(inlineActions.length - 5)+' more — open Details for full timeline</div>';
+        }
+      }
+
       detailsHtml += '</div>';
 
       return '<div class="agent-card st-'+a.status+'">'+
@@ -2494,6 +3361,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   }
 
   function render(state) {
+    try {
     currentState = state;
     var agents = state.agents || [];
     var activities = state.activities || [];
@@ -2537,6 +3405,9 @@ function getWebviewContent(webview: vscode.Webview): string {
         (h.agentCount?'<div class="ds-count">'+h.agentCount+'</div>':'')+
       '</div>';
     }).join('');
+    } catch (err) {
+      document.getElementById('agents').innerHTML = '<div class="empty-state"><div class="icon" style="color:var(--red);">&#9888;</div><p>Render error: '+(err.message||err)+'</p><div class="hint" style="word-break:break-all;font-size:9px;">'+(err.stack||'')+'</div></div>';
+    }
   }
 
   window.addEventListener('message', function(e) {
@@ -2553,6 +3424,11 @@ function getWebviewContent(webview: vscode.Webview): string {
   render({ agents:[], activities:[], stats:{total:0,active:0,completed:0,tokens:0,estimatedCost:0,avgDuration:'---'}, dataSourceHealth:[] });
   document.getElementById('agents').innerHTML = '<div class="empty-state"><div class="icon">&#9203;</div><p>Waiting for data from providers...</p><div class="hint">Requesting data...</div></div>';
   send('refresh');
+  // Mark that the script loaded successfully
+  var dbg = document.createElement('div');
+  dbg.style.cssText = 'position:fixed;bottom:4px;left:4px;font-size:8px;color:rgba(139,143,163,0.3);pointer-events:none;z-index:999;';
+  dbg.textContent = 'v0.9.1 loaded';
+  document.body.appendChild(dbg);
 })();
 </script>
 </body>
