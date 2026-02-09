@@ -396,6 +396,66 @@ class CopilotExtensionProvider extends DataProvider {
       this._message = 'Copilot Chat is active. Session-level details (tokens, tasks) are not yet available through its API.';
 
       // Add a single entry representing the active Copilot instance
+      // Enrich with workspace and MCP tool info so the detail pane isn't empty
+      const wsInfo: string[] = [];
+      const detectedTools: string[] = [];
+      const conversationHints: string[] = [];
+
+      // Gather workspace info
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (workspaceFolders && workspaceFolders.length > 0) {
+        for (const wf of workspaceFolders) {
+          wsInfo.push(path.basename(wf.uri.fsPath));
+        }
+        conversationHints.push('📂 Workspace: ' + wsInfo.join(', '));
+      }
+
+      // Gather configured MCP servers
+      const chatConfig = vscode.workspace.getConfiguration('chat');
+      const mcpCfg = chatConfig.get<any>('mcp');
+      if (mcpCfg && typeof mcpCfg === 'object') {
+        const servers = mcpCfg.servers || mcpCfg;
+        const serverNames = Object.keys(servers).filter(k => k !== 'servers');
+        for (const sn of serverNames) {
+          const server = servers[sn];
+          if (server?.disabled !== true) {
+            detectedTools.push(`MCP:${sn}`);
+            conversationHints.push(`🔌 MCP Server: ${sn}`);
+          }
+        }
+      }
+
+      // Check for agent mode
+      const agentEnabled = chatConfig.get<boolean>('agent.enabled');
+      if (agentEnabled) {
+        conversationHints.push('🤖 Agent Mode: enabled');
+      }
+
+      // Detect chat participants
+      try {
+        const allExtensions = vscode.extensions.all;
+        const chatExts = allExtensions.filter(ext =>
+          ext.packageJSON?.contributes?.chatParticipants?.length > 0
+        );
+        for (const ext of chatExts) {
+          const participants = ext.packageJSON.contributes.chatParticipants;
+          for (const p of participants) {
+            if (p.name && p.name !== 'copilot') {
+              detectedTools.push(`@${p.name}`);
+              conversationHints.push(`💬 Participant: @${p.name} — ${p.description || ''}`);
+            }
+          }
+        }
+      } catch { /* skip participant detection */ }
+
+      // Copilot extension version
+      const copilotVersion = copilotChat?.packageJSON?.version || copilot?.packageJSON?.version;
+      if (copilotVersion) {
+        conversationHints.push(`📦 Copilot version: ${copilotVersion}`);
+      }
+
+      conversationHints.push('ℹ️ Detailed conversation data available for completed chat sessions (saved to disk)');
+
       this._agents.push({
         id: 'copilot-active',
         name: 'GitHub Copilot Chat',
@@ -403,17 +463,18 @@ class CopilotExtensionProvider extends DataProvider {
         typeLabel: 'Copilot',
         model: '—',
         status: 'running',
-        task: 'Copilot Chat is active',
+        task: 'Copilot Chat is active' + (wsInfo.length > 0 ? ` in ${wsInfo[0]}` : ''),
         tokens: 0,
         startTime: Date.now(),
         elapsed: '—',
         progress: 0,
-        progressLabel: 'Active',
-        tools: [],
+        progressLabel: detectedTools.length > 0 ? `${detectedTools.length} tools` : 'Active',
+        tools: detectedTools,
         activeTool: null,
         files: [],
         location: 'local',
-        sourceProvider: this.id
+        sourceProvider: this.id,
+        conversationPreview: conversationHints
       });
 
     } catch (err: any) {
@@ -2431,6 +2492,72 @@ class DashboardProvider {
       allActivities.push(...provider.activities);
     }
 
+    // ── Enrichment pass: merge rich session data into basic Copilot agents ──
+    // The CopilotExtensionProvider creates a basic "copilot-active" agent with minimal info.
+    // The CopilotChatSessionProvider (or VSCodeChatSessionsProvider) may create richer agents
+    // with conversation data, tool calls, etc. If both exist, merge the rich data into the
+    // basic agent so the user sees everything in one place.
+    const basicCopilotIds: string[] = [];
+    const richCopilotAgents: AgentSession[] = [];
+    for (const [id, agent] of agentMap) {
+      if (agent.sourceProvider === 'copilot-extension' &&
+          !(agent.recentActions && agent.recentActions.length > 0)) {
+        basicCopilotIds.push(id);
+      }
+      if ((agent.sourceProvider === 'copilot-chat-sessions' || agent.sourceProvider === 'vscode-chat-sessions') &&
+          ((agent.recentActions && agent.recentActions.length > 0) ||
+           (agent.conversationPreview && agent.conversationPreview.length > 0) ||
+           (agent.files && agent.files.length > 0))) {
+        richCopilotAgents.push(agent);
+      }
+    }
+
+    if (basicCopilotIds.length > 0 && richCopilotAgents.length > 0) {
+      // Sort rich agents by startTime descending to get most recent
+      richCopilotAgents.sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+      const mostRecent = richCopilotAgents[0];
+      const basicAgent = agentMap.get(basicCopilotIds[0])!;
+
+      // Merge rich data into the basic agent
+      if (mostRecent.recentActions && mostRecent.recentActions.length > 0) {
+        basicAgent.recentActions = mostRecent.recentActions;
+      }
+      if (mostRecent.conversationPreview && mostRecent.conversationPreview.length > 0) {
+        basicAgent.conversationPreview = mostRecent.conversationPreview;
+      }
+      if (mostRecent.tools && mostRecent.tools.length > 0) {
+        basicAgent.tools = mostRecent.tools;
+      }
+      if (mostRecent.files && mostRecent.files.length > 0) {
+        basicAgent.files = mostRecent.files;
+      }
+      if (mostRecent.task && mostRecent.task !== 'Chat session') {
+        basicAgent.task = mostRecent.task;
+      }
+      if (mostRecent.tokens > 0) {
+        basicAgent.tokens = mostRecent.tokens;
+      }
+      if (mostRecent.activeTool) {
+        basicAgent.activeTool = mostRecent.activeTool;
+      }
+      if (mostRecent.progressLabel && mostRecent.progressLabel !== 'Active') {
+        basicAgent.progressLabel = mostRecent.progressLabel;
+      }
+      if (mostRecent.model && mostRecent.model !== '—') {
+        basicAgent.model = mostRecent.model;
+      }
+      if (mostRecent.typeLabel) {
+        basicAgent.typeLabel = mostRecent.typeLabel;
+      }
+
+      this.outputChannel.appendLine(`[dashboard] Merged rich session data (${mostRecent.recentActions?.length || 0} actions, ${mostRecent.conversationPreview?.length || 0} convo lines) into basic agent "${basicAgent.name}"`);
+
+      // Remove the standalone rich agent since its data has been merged
+      agentMap.delete(mostRecent.id);
+
+      // Also keep any remaining rich agents (older sessions) as separate cards
+    }
+
     // Persist first-seen times and update elapsed for each agent
     const now = Date.now();
     for (const [, agent] of agentMap) {
@@ -2615,7 +2742,7 @@ class DashboardProvider {
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.9.1', uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', version: '0.9.2', uptime: process.uptime() }));
         return;
       }
 
@@ -2647,6 +2774,228 @@ class DashboardProvider {
     }
   }
 
+  /**
+   * Run diagnostics to help debug session discovery issues.
+   * Shows a detailed report in a new editor tab.
+   */
+  async runDiagnostics() {
+    const lines: string[] = [];
+    lines.push('=== Agent Dashboard Diagnostics ===');
+    lines.push(`Time: ${new Date().toISOString()}`);
+    lines.push(`Platform: ${process.platform}`);
+    lines.push(`VS Code version: ${vscode.version}`);
+    lines.push('');
+
+    // Show active providers
+    lines.push('── Active Providers ──');
+    for (const p of this.providers) {
+      const s = p.status;
+      lines.push(`  ${s.id}: ${s.state} — ${s.message} (${p.agents.length} agents)`);
+    }
+    lines.push('');
+
+    // Show all agents
+    lines.push('── Current Agents ──');
+    await this.refresh();
+    for (const p of this.providers) {
+      for (const a of p.agents) {
+        lines.push(`  [${a.sourceProvider}] ${a.name} (id=${a.id})`);
+        lines.push(`    status=${a.status}, model=${a.model}, tokens=${a.tokens}`);
+        lines.push(`    tools=${JSON.stringify(a.tools)}`);
+        lines.push(`    files=${JSON.stringify(a.files?.slice(0, 5))}`);
+        lines.push(`    recentActions=${a.recentActions?.length || 0} items`);
+        lines.push(`    conversationPreview=${a.conversationPreview?.length || 0} lines`);
+      }
+    }
+    lines.push('');
+
+    // Show Copilot extension info
+    lines.push('── Copilot Extensions ──');
+    const copilotChat = vscode.extensions.getExtension('GitHub.copilot-chat');
+    const copilot = vscode.extensions.getExtension('GitHub.copilot');
+    lines.push(`  GitHub.copilot-chat: ${copilotChat ? `v${copilotChat.packageJSON?.version}, active=${copilotChat.isActive}` : 'NOT INSTALLED'}`);
+    lines.push(`  GitHub.copilot: ${copilot ? `v${copilot.packageJSON?.version}, active=${copilot.isActive}` : 'NOT INSTALLED'}`);
+
+    if (copilotChat?.exports) {
+      const api = copilotChat.exports;
+      const exportKeys = Object.keys(api).slice(0, 20);
+      lines.push(`  Copilot Chat exports: [${exportKeys.join(', ')}]`);
+      if (typeof api.getSessions === 'function') lines.push(`  Has getSessions() method`);
+      if (typeof api.getConversations === 'function') lines.push(`  Has getConversations() method`);
+      if (api.sessions) lines.push(`  Has sessions property`);
+    }
+    lines.push('');
+
+    // Scan for chat session files
+    lines.push('── Chat Session File Scan ──');
+    const home = os.homedir();
+    const candidateDirs: string[] = [];
+    const globalStoragePath = this.context.globalStorageUri.fsPath;
+    const primaryUserDir = path.resolve(globalStoragePath, '..', '..');
+    candidateDirs.push(primaryUserDir);
+
+    if (process.platform === 'darwin') {
+      candidateDirs.push(path.join(home, 'Library', 'Application Support', 'Code', 'User'));
+      candidateDirs.push(path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User'));
+      candidateDirs.push(path.join(home, 'Library', 'Application Support', 'Cursor', 'User'));
+    }
+
+    for (const userDir of [...new Set(candidateDirs)]) {
+      const wsStorage = path.join(userDir, 'workspaceStorage');
+      lines.push(`  User dir: ${userDir}`);
+      lines.push(`    workspaceStorage exists: ${fs.existsSync(wsStorage)}`);
+
+      if (fs.existsSync(wsStorage)) {
+        try {
+          const wsDirs = fs.readdirSync(wsStorage);
+          lines.push(`    ${wsDirs.length} workspace folders`);
+
+          let totalChatSessions = 0;
+          let totalCopilotChat = 0;
+          const recentFiles: { path: string; mtime: number; size: number }[] = [];
+
+          for (const wd of wsDirs) {
+            const wsPath = path.join(wsStorage, wd);
+
+            // Check chatSessions/
+            const csDir = path.join(wsPath, 'chatSessions');
+            if (fs.existsSync(csDir)) {
+              try {
+                const jsons = fs.readdirSync(csDir).filter(f => f.endsWith('.json'));
+                totalChatSessions += jsons.length;
+                for (const j of jsons.slice(0, 5)) {
+                  try {
+                    const fPath = path.join(csDir, j);
+                    const st = fs.statSync(fPath);
+                    recentFiles.push({ path: fPath, mtime: st.mtimeMs, size: st.size });
+                  } catch { /* skip */ }
+                }
+              } catch { /* skip */ }
+            }
+
+            // Check GitHub.copilot-chat/
+            for (const copDir of ['GitHub.copilot-chat', 'github.copilot-chat']) {
+              const cpDir = path.join(wsPath, copDir);
+              if (fs.existsSync(cpDir)) {
+                try {
+                  const jsons = this.countJsonFiles(cpDir, 2);
+                  totalCopilotChat += jsons;
+                } catch { /* skip */ }
+              }
+            }
+          }
+
+          lines.push(`    chatSessions/ JSON files: ${totalChatSessions}`);
+          lines.push(`    GitHub.copilot-chat/ JSON files: ${totalCopilotChat}`);
+
+          // Show most recent files
+          recentFiles.sort((a, b) => b.mtime - a.mtime);
+          if (recentFiles.length > 0) {
+            lines.push(`    Most recent session files:`);
+            for (const rf of recentFiles.slice(0, 5)) {
+              const age = Date.now() - rf.mtime;
+              const ageStr = age < 60000 ? `${Math.floor(age / 1000)}s` :
+                             age < 3600000 ? `${Math.floor(age / 60000)}m` :
+                             `${Math.floor(age / 3600000)}h`;
+              lines.push(`      ${path.basename(rf.path)} (${(rf.size / 1024).toFixed(1)}KB, ${ageStr} ago)`);
+
+              // Try to read and show structure of most recent file
+              if (rf === recentFiles[0] && rf.size < 500000) {
+                try {
+                  const content = JSON.parse(fs.readFileSync(rf.path, 'utf-8'));
+                  const topKeys = Object.keys(content).slice(0, 15);
+                  lines.push(`      Top-level keys: [${topKeys.join(', ')}]`);
+                  if (content.requests) lines.push(`      requests: ${content.requests.length} entries`);
+                  if (content.turns) lines.push(`      turns: ${content.turns.length} entries`);
+                  if (content.messages) lines.push(`      messages: ${Array.isArray(content.messages) ? content.messages.length : typeof content.messages} entries`);
+                  if (content.title) lines.push(`      title: "${content.title}"`);
+                  if (content.model) lines.push(`      model: "${content.model}"`);
+
+                  // Check first request structure
+                  const reqs = content.requests || content.turns || [];
+                  if (reqs.length > 0) {
+                    const firstReq = reqs[0];
+                    lines.push(`      First request keys: [${Object.keys(firstReq).join(', ')}]`);
+                    if (firstReq.response) {
+                      lines.push(`      response type: ${Array.isArray(firstReq.response) ? `array[${firstReq.response.length}]` : typeof firstReq.response}`);
+                      if (Array.isArray(firstReq.response) && firstReq.response.length > 0) {
+                        lines.push(`      response[0] keys: [${Object.keys(firstReq.response[0]).join(', ')}]`);
+                        lines.push(`      response[0].type: ${firstReq.response[0].type}`);
+                      }
+                    }
+                  }
+                } catch (err: any) {
+                  lines.push(`      Parse error: ${err?.message}`);
+                }
+              }
+            }
+          } else {
+            lines.push(`    No session files found in any workspace`);
+          }
+
+          // Check globalStorage for copilot data
+          for (const copDir of ['GitHub.copilot-chat', 'github.copilot-chat']) {
+            const gDir = path.join(userDir, 'globalStorage', copDir);
+            if (fs.existsSync(gDir)) {
+              const count = this.countJsonFiles(gDir, 3);
+              lines.push(`    globalStorage/${copDir}/: ${count} JSON files`);
+            }
+          }
+        } catch (err: any) {
+          lines.push(`    Error scanning: ${err?.message}`);
+        }
+      }
+    }
+
+    // MCP Configuration
+    lines.push('');
+    lines.push('── MCP Configuration ──');
+    const chatConfig = vscode.workspace.getConfiguration('chat');
+    const mcpCfg = chatConfig.get<any>('mcp');
+    if (mcpCfg) {
+      const servers = mcpCfg.servers || mcpCfg;
+      const names = Object.keys(servers).filter(k => k !== 'servers');
+      lines.push(`  Configured MCP servers: ${names.join(', ') || '(none)'}`);
+    } else {
+      lines.push(`  No MCP configuration found`);
+    }
+    lines.push(`  chat.agent.enabled: ${chatConfig.get<boolean>('agent.enabled')}`);
+
+    // Workspace folders
+    lines.push('');
+    lines.push('── Workspace ──');
+    const wsFolders = vscode.workspace.workspaceFolders;
+    if (wsFolders) {
+      for (const wf of wsFolders) {
+        lines.push(`  ${wf.name}: ${wf.uri.fsPath}`);
+      }
+    } else {
+      lines.push(`  No workspace folders open`);
+    }
+
+    // Show the report
+    const doc = await vscode.workspace.openTextDocument({
+      content: lines.join('\n'),
+      language: 'text'
+    });
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+  }
+
+  private countJsonFiles(dir: string, maxDepth: number): number {
+    if (maxDepth <= 0) return 0;
+    let count = 0;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.json')) count++;
+        else if (entry.isDirectory() && maxDepth > 1) {
+          count += this.countJsonFiles(path.join(dir, entry.name), maxDepth - 1);
+        }
+      }
+    } catch { /* skip */ }
+    return count;
+  }
+
   dispose() {
     this.panel?.dispose();
     this.stopPolling();
@@ -2666,7 +3015,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('agentDashboard.open', () => dashboardProvider.open()),
     vscode.commands.registerCommand('agentDashboard.refresh', () => dashboardProvider.refresh()),
     vscode.commands.registerCommand('agentDashboard.startApi', () => dashboardProvider.startApiServer()),
-    vscode.commands.registerCommand('agentDashboard.stopApi', () => dashboardProvider.stopApiServer())
+    vscode.commands.registerCommand('agentDashboard.stopApi', () => dashboardProvider.stopApiServer()),
+    vscode.commands.registerCommand('agentDashboard.diagnostics', () => dashboardProvider.runDiagnostics())
   );
 
   // Auto-start API server if configured
@@ -2909,7 +3259,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.9.1</span></h1>
+      <h1>Agent Dashboard <span>v0.9.2</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -3427,7 +3777,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   // Mark that the script loaded successfully
   var dbg = document.createElement('div');
   dbg.style.cssText = 'position:fixed;bottom:4px;left:4px;font-size:8px;color:rgba(139,143,163,0.3);pointer-events:none;z-index:999;';
-  dbg.textContent = 'v0.9.1 loaded';
+  dbg.textContent = 'v0.9.2 loaded';
   document.body.appendChild(dbg);
 })();
 </script>
