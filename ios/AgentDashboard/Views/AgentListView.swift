@@ -3,12 +3,16 @@ import SwiftUI
 struct AgentListView: View {
     let agents: [AgentSession]
     @State private var filter: AgentStatus? = nil
+    @State private var providerFilter: String? = nil
     @State private var expandedAgent: String? = nil
     @State private var detailAgent: AgentSession? = nil
     @State private var searchText: String = ""
 
     var filteredAgents: [AgentSession] {
         var result = agents
+        if let providerFilter = providerFilter {
+            result = result.filter { $0.sourceProvider == providerFilter }
+        }
         if let filter = filter {
             result = result.filter { $0.status == filter }
         }
@@ -27,6 +31,33 @@ struct AgentListView: View {
             }
         }
         return result
+    }
+
+    /// Unique source providers present in the agent list, sorted by count descending
+    private var activeProviders: [(id: String, name: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for agent in agents {
+            counts[agent.sourceProvider, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value > $1.value }
+            .map { (id: $0.key, name: Self.friendlyProviderName($0.key), count: $0.value) }
+    }
+
+    /// Maps internal provider IDs to short friendly names
+    static func friendlyProviderName(_ id: String) -> String {
+        switch id {
+        case "copilot-extension": return "Copilot"
+        case "vscode-chat-sessions": return "Chat Sessions"
+        case "chat-tools-participants": return "Chat Agents"
+        case "custom-workspace-agents": return "Custom Agents"
+        case "terminal-processes": return "Terminals"
+        case "claude-desktop-todos": return "Claude Desktop"
+        case "github-actions": return "GitHub Actions"
+        case "remote-connections": return "Remote"
+        case "workspace-activity": return "Workspace"
+        default: return id
+        }
     }
 
     var body: some View {
@@ -62,7 +93,7 @@ struct AgentListView: View {
                     .padding(.horizontal)
                     .padding(.top, 4)
 
-                    // Filter chips
+                    // Status filter chips
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             FilterChip(label: "All", count: agents.count, isSelected: filter == nil) {
@@ -79,14 +110,70 @@ struct AgentListView: View {
                         }
                         .padding(.horizontal)
                     }
-                    .padding(.vertical, 8)
+                    .padding(.top, 8)
+
+                    // Source / provider filter chips (only show if 2+ providers)
+                    if activeProviders.count >= 2 {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                Text("Source:")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .textCase(.uppercase)
+
+                                ProviderChip(label: "All", isSelected: providerFilter == nil) {
+                                    providerFilter = nil
+                                }
+                                ForEach(activeProviders, id: \.id) { provider in
+                                    ProviderChip(
+                                        label: "\(provider.name) (\(provider.count))",
+                                        isSelected: providerFilter == provider.id
+                                    ) {
+                                        providerFilter = providerFilter == provider.id ? nil : provider.id
+                                    }
+                                }
+                            }
+                            .padding(.horizontal)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(.bottom, 8)
+
+                // Active filter summary + clear button
+                if filter != nil || providerFilter != nil || !searchText.isEmpty {
+                    HStack {
+                        HStack(spacing: 6) {
+                            Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("\(filteredAgents.count) of \(agents.count) agents")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                filter = nil
+                                providerFilter = nil
+                                searchText = ""
+                            }
+                        } label: {
+                            Text("Clear Filters")
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
                 }
 
                 if filteredAgents.isEmpty {
                     EmptyStateView(
                         icon: "magnifyingglass",
                         title: "No Matching Agents",
-                        subtitle: "Try a different search term or clear the filter"
+                        subtitle: "Try a different search term or clear the filters"
                     )
                     .padding(.top, 40)
                 } else {
@@ -102,6 +189,11 @@ struct AgentListView: View {
                                 },
                                 onShowDetails: {
                                     detailAgent = agent
+                                },
+                                onFilterProvider: { providerId in
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        providerFilter = providerFilter == providerId ? nil : providerId
+                                    }
                                 }
                             )
                         }
@@ -151,6 +243,31 @@ struct FilterChip: View {
     }
 }
 
+// MARK: - Provider Chip
+
+struct ProviderChip: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.caption2)
+                .fontWeight(isSelected ? .semibold : .regular)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(isSelected ? Color.cyan.opacity(0.15) : Color(.tertiarySystemFill))
+                .foregroundStyle(isSelected ? .cyan : .secondary)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(isSelected ? Color.cyan.opacity(0.4) : Color.clear, lineWidth: 1)
+                )
+        }
+    }
+}
+
 // MARK: - Agent Card
 
 struct AgentCard: View {
@@ -158,6 +275,7 @@ struct AgentCard: View {
     let isExpanded: Bool
     let onToggleExpand: () -> Void
     let onShowDetails: () -> Void
+    var onFilterProvider: ((String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -181,6 +299,20 @@ struct AgentCard: View {
                         Label(agent.location.rawValue.capitalized, systemImage: agent.location.iconName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        if let onFilterProvider = onFilterProvider {
+                            Button {
+                                onFilterProvider(agent.sourceProvider)
+                            } label: {
+                                Text(AgentListView.friendlyProviderName(agent.sourceProvider))
+                                    .font(.caption2)
+                                    .foregroundStyle(.cyan)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.cyan.opacity(0.1))
+                                    .clipShape(Capsule())
+                            }
+                        }
                     }
                 }
 
