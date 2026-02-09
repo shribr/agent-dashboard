@@ -1,0 +1,14 @@
+name = "agent-dashboard-relay"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# KV namespace for storing dashboard state (create via: npx wrangler kv namespace create DASHBOARD_STATE)
+# After creating, uncomment and fill in the id:
+# [[kv_namespaces]]
+# binding = "DASHBOARD_STATE"
+# id = "YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# Set a shared secret so only your VS Code extension can push state
+# Change this to something unique!
+AUTH_TOKEN = "a6654d0d357ce3e1e31e1ba5486819aaa3dce28a42957d25ecdf5227c566e44e"

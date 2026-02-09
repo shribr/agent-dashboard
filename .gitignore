@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+extension/dist/
+*.vsix
+
+# macOS
+.DS_Store
+
+# VS Code test
+.vscode-test/
+
+# Xcode
+ios/AgentDashboard.xcodeproj/xcuserdata/
+ios/AgentDashboard.xcodeproj/project.xcworkspace/xcuserdata/
+ios/build/
+ios/DerivedData/
+
+# Cloudflare
+relay/.wrangler/
+
+# Environment / secrets
+.env
+.env.local
+
+.fake

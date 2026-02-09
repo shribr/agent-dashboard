@@ -1,0 +1,227 @@
+{
+  "name": "agent-dashboard",
+  "displayName": "Agent Dashboard",
+  "description": "Real-time visual monitoring dashboard for AI coding agents — Copilot, Claude Code, and more",
+  "version": "0.5.0",
+  "publisher": "ami",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amischreiber/agent-dashboard"
+  },
+  "categories": ["Visualization", "Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentDashboard.open",
+        "title": "Agent Dashboard: Open"
+      },
+      {
+        "command": "agentDashboard.refresh",
+        "title": "Agent Dashboard: Refresh"
+      },
+      {
+        "command": "agentDashboard.startApi",
+        "title": "Agent Dashboard: Start Mobile API Server"
+      },
+      {
+        "command": "agentDashboard.stopApi",
+        "title": "Agent Dashboard: Stop Mobile API Server"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "agentDashboard.open",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Dashboard",
+      "properties": {
+        "agentDashboard.primarySource": {
+          "type": "string",
+          "default": "copilot",
+          "enum": ["copilot", "claude-code", "both"],
+          "enumDescriptions": [
+            "GitHub Copilot Chat — monitors Copilot extension and VS Code Chat Sessions API",
+            "Claude Code — monitors Claude CLI sessions, ~/.claude directory, and terminal processes",
+            "Both — enable all data sources simultaneously"
+          ],
+          "description": "Primary agent data source. Switch this if one source's API breaks — the other will keep working."
+        },
+        "agentDashboard.pollInterval": {
+          "type": "number",
+          "default": 3000,
+          "description": "How often to poll for agent updates (ms)"
+        },
+        "agentDashboard.claudeHomePath": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to .claude directory (defaults to ~/.claude)"
+        },
+        "agentDashboard.showRemoteAgents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show remote/cloud agent sessions (GitHub Actions, SSH, etc.)"
+        },
+        "agentDashboard.showTokenCost": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show estimated token cost"
+        },
+        "agentDashboard.enabledProviders": {
+          "type": "object",
+          "default": {
+            "vscode-chat-sessions": false,
+            "copilot-extension": true,
+            "terminal-processes": true,
+            "claude-desktop-todos": true,
+            "github-actions": true,
+            "remote-connections": true,
+            "workspace-activity": true
+          },
+          "description": "Toggle individual data providers on/off. Disable any provider that causes issues."
+        },
+        "agentDashboard.apiAutoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the REST API server for mobile app connections when VS Code launches"
+        },
+        "agentDashboard.apiPort": {
+          "type": "number",
+          "default": 19850,
+          "description": "Port for the local REST API server (used by the iOS app)"
+        },
+        "agentDashboard.cloudRelayUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Cloud relay URL (Cloudflare Worker) for remote iOS access. Leave empty to disable."
+        },
+        "agentDashboard.cloudRelayToken": {
+          "type": "string",
+          "default": "",
+          "description": "Auth token for cloud relay (must match the AUTH_TOKEN in your Cloudflare Worker)"
+        },
+        "agentDashboard.alerts.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable email/SMS alerts for agent events"
+        },
+        "agentDashboard.alerts.email.provider": {
+          "type": "string",
+          "default": "none",
+          "enum": ["none", "sendgrid", "smtp"],
+          "description": "Email provider for alerts"
+        },
+        "agentDashboard.alerts.email.sendgridApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "SendGrid API key (if using SendGrid)"
+        },
+        "agentDashboard.alerts.email.smtpHost": {
+          "type": "string",
+          "default": "",
+          "description": "SMTP server hostname (if using SMTP)"
+        },
+        "agentDashboard.alerts.email.smtpPort": {
+          "type": "number",
+          "default": 587,
+          "description": "SMTP server port"
+        },
+        "agentDashboard.alerts.email.smtpUser": {
+          "type": "string",
+          "default": "",
+          "description": "SMTP username"
+        },
+        "agentDashboard.alerts.email.smtpPass": {
+          "type": "string",
+          "default": "",
+          "description": "SMTP password"
+        },
+        "agentDashboard.alerts.email.from": {
+          "type": "string",
+          "default": "agent-dashboard@localhost",
+          "description": "From email address for alerts"
+        },
+        "agentDashboard.alerts.email.to": {
+          "type": "string",
+          "default": "",
+          "description": "Recipient email address"
+        },
+        "agentDashboard.alerts.sms.provider": {
+          "type": "string",
+          "default": "none",
+          "enum": ["none", "twilio"],
+          "description": "SMS provider for alerts"
+        },
+        "agentDashboard.alerts.sms.twilioAccountSid": {
+          "type": "string",
+          "default": "",
+          "description": "Twilio Account SID"
+        },
+        "agentDashboard.alerts.sms.twilioAuthToken": {
+          "type": "string",
+          "default": "",
+          "description": "Twilio Auth Token"
+        },
+        "agentDashboard.alerts.sms.twilioFrom": {
+          "type": "string",
+          "default": "",
+          "description": "Twilio phone number (from)"
+        },
+        "agentDashboard.alerts.sms.to": {
+          "type": "string",
+          "default": "",
+          "description": "Recipient phone number for SMS alerts"
+        },
+        "agentDashboard.alerts.webhook.url": {
+          "type": "string",
+          "default": "",
+          "description": "Optional webhook URL — sends JSON POST for all alert events (works with Slack, Discord, etc.)"
+        },
+        "agentDashboard.alerts.rules": {
+          "type": "array",
+          "default": [
+            { "event": "agent-completed", "channels": ["email"], "enabled": true },
+            { "event": "agent-error", "channels": ["email", "sms"], "enabled": true },
+            { "event": "agent-started", "channels": [], "enabled": false },
+            { "event": "provider-degraded", "channels": ["email"], "enabled": true }
+          ],
+          "description": "Alert rules — which events trigger which channels",
+          "items": {
+            "type": "object",
+            "properties": {
+              "event": {
+                "type": "string",
+                "enum": ["agent-completed", "agent-error", "agent-started", "provider-degraded"]
+              },
+              "channels": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["email", "sms", "webhook"] }
+              },
+              "enabled": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
