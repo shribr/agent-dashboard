@@ -10,7 +10,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/amischreiber/agent-dashboard"
+    "url": "https://github.com/shribr/agent-dashboard"
   },
   "categories": ["Visualization", "Other"],
   "activationEvents": [],
