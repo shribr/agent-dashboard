@@ -360,31 +360,35 @@ struct AgentCard: View {
 
 struct IndeterminateProgressBar: View {
     let color: Color
-    @State private var offset: CGFloat = -0.3
+    @State private var phase: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
-            ZStack(alignment: .leading) {
-                // Track
-                Capsule()
-                    .fill(color.opacity(0.15))
-                    .frame(height: 4)
-
-                // Sliding bar
-                Capsule()
-                    .fill(color)
-                    .frame(width: width * 0.3, height: 4)
-                    .offset(x: offset * width)
-            }
+            Capsule()
+                .fill(color.opacity(0.15))
+                .frame(height: 4)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [color.opacity(0.3), color, color.opacity(0.3)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: width * 0.3, height: 4)
+                        .offset(x: -width * 0.3 + phase * (width * 1.3))
+                }
+                .clipShape(Capsule())
         }
         .frame(height: 4)
         .onAppear {
             withAnimation(
-                .easeInOut(duration: 1.4)
-                .repeatForever(autoreverses: true)
+                .linear(duration: 1.6)
+                .repeatForever(autoreverses: false)
             ) {
-                offset = 0.7
+                phase = 1.0
             }
         }
     }

@@ -1230,6 +1230,7 @@ class DashboardProvider {
   open() {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside);
+      this.refresh();
       return;
     }
 
@@ -1243,7 +1244,7 @@ class DashboardProvider {
       }
     );
 
-    this.panel.webview.html = getWebviewContent();
+    this.panel.webview.html = getWebviewContent(this.panel.webview);
 
     this.panel.webview.onDidReceiveMessage(
       async (msg) => this.handleMessage(msg),
@@ -1437,7 +1438,12 @@ class DashboardProvider {
     // Push to cloud relay if configured (fire-and-forget)
     this.pushToCloudRelay(state);
 
-    this.panel?.webview.postMessage({ type: 'update', state });
+    if (this.panel) {
+      this.outputChannel.appendLine(`[dashboard] Posting state to webview: ${agents.length} agents, ${allActivities.length} activities`);
+      this.panel.webview.postMessage({ type: 'update', state });
+    } else {
+      this.outputChannel.appendLine(`[dashboard] WARNING: No panel open, skipping webview update`);
+    }
   }
 
   private async pushToCloudRelay(state: DashboardState) {
@@ -1592,13 +1598,23 @@ export function deactivate() {
 
 // ─── Webview HTML ────────────────────────────────────────────────────────────
 
-function getWebviewContent(): string {
+function getNonce(): string {
+  let text = '';
+  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  for (let i = 0; i < 32; i++) {
+    text += possible.charAt(Math.floor(Math.random() * possible.length));
+  }
+  return text;
+}
+
+function getWebviewContent(webview: vscode.Webview): string {
+  const nonce = getNonce();
   return /*html*/`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Agent Dashboard</title>
 <style>
   :root {
@@ -1649,7 +1665,7 @@ function getWebviewContent(): string {
   .section-header { font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim); margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; }
   .agent-list { display:flex; flex-direction:column; gap:8px; }
 
-  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; cursor:pointer; }
+  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; }
   .agent-card:hover { border-color:rgba(108,92,231,0.4); }
   .agent-card.expanded { border-color:var(--accent); }
   .agent-card.st-running { border-left:3px solid var(--green); }
@@ -1661,11 +1677,30 @@ function getWebviewContent(): string {
   .agent-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px; }
   .agent-info { flex:1; min-width:0; }
   .agent-name { font-weight:600; font-size:13px; margin-bottom:2px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-  .agent-expand-icon { font-size:10px; color:var(--text-dim); transition:transform 0.2s; }
-  .agent-card.expanded .agent-expand-icon { transform:rotate(90deg); }
   .agent-task { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .agent-right { display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0; }
+  .agent-toggle-btn { display:flex; align-items:center; gap:3px; padding:2px 7px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:9px; cursor:pointer; font-family:inherit; transition:all 0.15s; }
+  .agent-toggle-btn:hover { border-color:var(--accent); color:var(--text); }
+  .agent-toggle-btn .arrow { font-size:10px; transition:transform 0.2s; }
+  .agent-card.expanded .agent-toggle-btn .arrow { transform:rotate(90deg); }
   .agent-details { display:none; margin-top:10px; border-top:1px solid var(--border); padding-top:10px; }
   .agent-card.expanded .agent-details { display:block; }
+
+  /* Slide-out detail panel */
+  .detail-overlay { display:none; position:fixed; top:0; right:0; bottom:0; left:0; z-index:99; }
+  .detail-overlay.open { display:block; }
+  .detail-panel { position:fixed; top:0; right:0; bottom:0; width:340px; background:var(--surface); border-left:1px solid var(--border); z-index:100; transform:translateX(100%); transition:transform 0.25s ease; overflow-y:auto; box-shadow:-4px 0 20px rgba(0,0,0,0.3); }
+  .detail-panel.open { transform:translateX(0); }
+  .detail-panel-header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); z-index:1; }
+  .detail-panel-header h3 { font-size:13px; font-weight:600; margin:0; }
+  .detail-panel-close { padding:4px 8px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:14px; cursor:pointer; font-family:inherit; line-height:1; }
+  .detail-panel-close:hover { border-color:var(--accent); color:var(--text); }
+  .detail-panel-body { padding:14px 16px; }
+  .detail-section { margin-bottom:14px; }
+  .detail-section-title { font-size:10px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; font-weight:600; }
+  .panel-toggle-btn { display:inline-flex; align-items:center; gap:3px; padding:2px 7px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:9px; cursor:pointer; font-family:inherit; transition:all 0.15s; margin-top:4px; }
+  .panel-toggle-btn:hover { border-color:var(--accent); color:var(--text); }
+  .panel-toggle-btn .arrow { font-size:10px; }
   .task-list { list-style:none; padding:0; margin:0; }
   .task-item { display:flex; align-items:flex-start; gap:8px; padding:4px 0; font-size:11px; }
   .task-icon { flex-shrink:0; width:16px; height:16px; display:flex; align-items:center; justify-content:center; font-size:10px; }
@@ -1707,7 +1742,7 @@ function getWebviewContent(): string {
   .pf-red { background:var(--red); }
 
   /* Activity indicator (indeterminate — continuous gradient sweep) */
-  .activity-indicator { width:100%; height:4px; border-radius:2px; overflow:hidden; margin-top:8px; background:linear-gradient(90deg, var(--surface2) 0%, var(--green) 20%, var(--cyan) 40%, var(--surface2) 60%); background-size:300% 100%; animation:sweep 1.8s linear infinite; }
+  .activity-indicator { width:100%; height:4px; border-radius:2px; overflow:hidden; margin-top:8px; background:linear-gradient(90deg, var(--surface2) 0%, var(--green) 20%, var(--cyan) 40%, var(--surface2) 60%); background-size:300% 100%; animation:sweep 3s linear infinite; }
   @keyframes sweep { 0%{background-position:100% 0} 100%{background-position:-100% 0} }
 
   .progress-label { display:flex; justify-content:space-between; font-size:9px; color:var(--text-dim); margin-top:3px; }
@@ -1767,17 +1802,17 @@ function getWebviewContent(): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.5.0</span></h1>
+      <h1>Agent Dashboard <span>v0.8.0</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
-      <select id="source-select" onchange="send('switchSource',{source:this.value})" style="padding:3px 8px;border-radius:5px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:10px;font-family:inherit;cursor:pointer;">
+      <select id="source-select" style="padding:3px 8px;border-radius:5px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:10px;font-family:inherit;cursor:pointer;">
         <option value="copilot">Copilot</option>
         <option value="claude-code">Claude Code</option>
         <option value="both">Both</option>
       </select>
-      <button class="btn" onclick="send('refresh')">&#8635; Refresh</button>
-      <button class="btn" onclick="send('openLog')">&#128196; Log</button>
+      <button class="btn" id="btn-refresh">&#8635; Refresh</button>
+      <button class="btn" id="btn-log">&#128196; Log</button>
     </div>
   </div>
   <div class="stats-row" id="stats"></div>
@@ -1787,7 +1822,7 @@ function getWebviewContent(): string {
       <div class="search-filter-bar">
         <div class="search-wrap">
           <span class="search-icon">&#128269;</span>
-          <input class="search-input" id="search-input" type="text" placeholder="Search agents by name, task, model..." oninput="applyFilter()">
+          <input class="search-input" id="search-input" type="text" placeholder="Search agents by name, task, model...">
         </div>
         <div class="filter-chips" id="filter-chips"></div>
       </div>
@@ -1805,200 +1840,329 @@ function getWebviewContent(): string {
     </div>
   </div>
 </div>
-<script>
-const vscode = acquireVsCodeApi();
-function send(command, data) { vscode.postMessage({ command, ...data }); }
-function fmt(n) { return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':String(n); }
-function sc(s) { return {running:'green',thinking:'orange',paused:'yellow',done:'blue',error:'red',queued:'gray'}[s]||'gray'; }
-function dc(t) { return {tool_use:'d-green',file_edit:'d-accent',command:'d-blue',thinking:'d-orange',complete:'d-blue',error:'d-red',start:'d-gray',info:'d-gray'}[t]||'d-gray'; }
-function toggleAgent(el) { el.classList.toggle('expanded'); }
-let lastUpdate = null;
-let currentState = null;
-let activeStatusFilter = null;
+<div class="detail-overlay" id="detail-overlay"></div>
+<div class="detail-panel" id="detail-panel">
+  <div class="detail-panel-header">
+    <h3 id="detail-panel-title">Agent Details</h3>
+    <button class="detail-panel-close" id="detail-panel-close">&#10005;</button>
+  </div>
+  <div class="detail-panel-body" id="detail-panel-body"></div>
+</div>
+<script nonce="${nonce}">
+(function() {
+  var vscode = acquireVsCodeApi();
+  function send(cmd, data) { vscode.postMessage(Object.assign({ command: cmd }, data || {})); }
+  function fmt(n) { return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':String(n); }
+  function sc(s) { return {running:'green',thinking:'orange',paused:'yellow',done:'blue',error:'red',queued:'gray'}[s]||'gray'; }
+  function dc(t) { return {tool_use:'d-green',file_edit:'d-accent',command:'d-blue',thinking:'d-orange',complete:'d-blue',error:'d-red',start:'d-gray',info:'d-gray'}[t]||'d-gray'; }
 
-function applyFilter() {
-  if (currentState) renderAgents(currentState.agents || []);
-}
+  var lastUpdate = null;
+  var currentState = null;
+  var activeStatusFilter = null;
 
-function setStatusFilter(status) {
-  activeStatusFilter = activeStatusFilter === status ? null : status;
-  applyFilter();
-}
+  // ── Event listeners for static elements (replacing inline handlers) ──
+  document.getElementById('btn-refresh').addEventListener('click', function() { send('refresh'); });
+  document.getElementById('btn-log').addEventListener('click', function() { send('openLog'); });
+  document.getElementById('source-select').addEventListener('change', function() { send('switchSource', { source: this.value }); });
+  document.getElementById('search-input').addEventListener('input', function() { applyFilter(); });
 
-function renderFilterChips(agents) {
-  const counts = {};
-  for (const a of agents) counts[a.status] = (counts[a.status]||0) + 1;
-  const statuses = ['running','thinking','paused','done','error','queued'];
-  const labels = {running:'Running',thinking:'Thinking',paused:'Paused',done:'Done',error:'Error',queued:'Queued'};
-  let html = '<button class="filter-chip'+(activeStatusFilter===null?' active':'')+'" onclick="setStatusFilter(null)">All <span class="chip-count">'+agents.length+'</span></button>';
-  for (const s of statuses) {
-    if (counts[s]) {
-      html += '<button class="filter-chip'+(activeStatusFilter===s?' active':'')+'" onclick="setStatusFilter(\''+s+'\')">'+labels[s]+' <span class="chip-count">'+counts[s]+'</span></button>';
+  // ── Event delegation for dynamic elements (filter chips & agent cards) ──
+  document.getElementById('filter-chips').addEventListener('click', function(e) {
+    var btn = e.target.closest('.filter-chip');
+    if (!btn) return;
+    var status = btn.getAttribute('data-status') || null;
+    activeStatusFilter = (status === activeStatusFilter) ? null : status;
+    applyFilter();
+  });
+  // Expand/collapse inline details
+  document.getElementById('agents').addEventListener('click', function(e) {
+    // Toggle expand on the expand button only
+    var expandBtn = e.target.closest('.agent-toggle-btn');
+    if (expandBtn) {
+      var card = expandBtn.closest('.agent-card');
+      if (card) card.classList.toggle('expanded');
+      return;
     }
-  }
-  document.getElementById('filter-chips').innerHTML = html;
-}
+    // Open slide-out panel on the panel toggle button
+    var panelBtn = e.target.closest('.panel-toggle-btn');
+    if (panelBtn) {
+      var agentId = panelBtn.getAttribute('data-agent-id');
+      if (agentId) openDetailPanel(agentId);
+      return;
+    }
+  });
 
-function renderAgents(agents) {
-  const searchTerm = (document.getElementById('search-input').value || '').toLowerCase().trim();
-  renderFilterChips(agents);
+  // Close detail panel
+  document.getElementById('detail-panel-close').addEventListener('click', function() { closeDetailPanel(); });
+  document.getElementById('detail-overlay').addEventListener('click', function() { closeDetailPanel(); });
 
-  let filtered = agents;
-  if (activeStatusFilter) filtered = filtered.filter(a => a.status === activeStatusFilter);
-  if (searchTerm) filtered = filtered.filter(a =>
-    a.name.toLowerCase().includes(searchTerm) ||
-    a.task.toLowerCase().includes(searchTerm) ||
-    a.model.toLowerCase().includes(searchTerm) ||
-    a.typeLabel.toLowerCase().includes(searchTerm) ||
-    a.sourceProvider.toLowerCase().includes(searchTerm) ||
-    (a.tasks||[]).some(t => (t.content||'').toLowerCase().includes(searchTerm) || (t.activeForm||'').toLowerCase().includes(searchTerm))
-  );
+  var activePanelAgentId = null;
 
-  document.getElementById('agent-count').textContent = filtered.length !== agents.length
-    ? filtered.length+' of '+agents.length
-    : (agents.length ? agents.length+' total' : '');
+  function openDetailPanel(agentId) {
+    if (!currentState) return;
+    var agents = currentState.agents || [];
+    var agent = null;
+    for (var i = 0; i < agents.length; i++) {
+      if (agents[i].id === agentId) { agent = agents[i]; break; }
+    }
+    if (!agent) return;
+    activePanelAgentId = agentId;
 
-  const el = document.getElementById('agents');
-  if (!filtered.length) {
-    el.innerHTML = agents.length
-      ? '<div class="empty-state"><div class="icon">&#128269;</div><p>No agents match your filter</p><div class="hint">Try a different search term or clear the filter</div></div>'
-      : '<div class="empty-state"><div class="icon">&#9881;</div><p>No agent sessions detected</p><div class="hint">Check Data Sources below for connection status</div></div>';
-    return;
-  }
+    document.getElementById('detail-panel-title').textContent = agent.name;
+    var body = document.getElementById('detail-panel-body');
+    var html = '';
 
-  el.innerHTML = filtered.map(a => {
-    const color = sc(a.status);
-    const active = a.status==='running'||a.status==='thinking';
-    const loc = a.remoteHost || (a.location.charAt(0).toUpperCase()+a.location.slice(1));
-    const tasks = a.tasks || [];
-    const hasTasks = tasks.length > 0;
-    const taskIcons = { completed:'&#10003;', in_progress:'&#9654;', pending:'&#9675;' };
+    // Status & meta
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-title">Status</div>';
+    html += '<div style="margin-bottom:6px;"><span class="sb sb-'+agent.status+'">'+agent.status.charAt(0).toUpperCase()+agent.status.slice(1)+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+agent.task+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+agent.model+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+agent.sourceProvider+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Elapsed</span><span class="detail-value">'+agent.elapsed+'</span></div>';
+    var loc = agent.remoteHost || (agent.location.charAt(0).toUpperCase()+agent.location.slice(1));
+    html += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
+    if (agent.pid) html += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+agent.pid+'</span></div>';
+    if (agent.activeTool) html += '<div class="detail-row"><span class="detail-label">Active Tool</span><span class="detail-value">'+agent.activeTool+'</span></div>';
+    if (agent.tokens) html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">'+fmt(agent.tokens)+'</span></div>';
+    html += '</div>';
 
-    let detailsHtml = '<div class="agent-details">';
-
-    // Meta details
-    detailsHtml += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+a.model+'</span></div>';
-    detailsHtml += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+a.sourceProvider+'</span></div>';
-    detailsHtml += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
-    if (a.pid) detailsHtml += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+a.pid+'</span></div>';
-    if (a.activeTool) detailsHtml += '<div class="detail-row"><span class="detail-label">Active</span><span class="detail-value">'+a.activeTool+'</span></div>';
-
-    // Task list
-    if (hasTasks) {
-      const completed = tasks.filter(t=>t.status==='completed').length;
-      detailsHtml += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tasks ('+completed+'/'+tasks.length+' done)</div>';
-      detailsHtml += '<ul class="task-list">';
-      for (const t of tasks) {
-        const icon = taskIcons[t.status] || '&#9675;';
-        detailsHtml += '<li class="task-item"><span class="task-icon '+t.status+'">'+icon+'</span><span class="task-text '+t.status+'">'+(t.activeForm || t.content)+'</span></li>';
+    // Tasks / Todos
+    var tasks = agent.tasks || [];
+    if (tasks.length > 0) {
+      var completed = 0;
+      for (var ti = 0; ti < tasks.length; ti++) { if (tasks[ti].status === 'completed') completed++; }
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Tasks &amp; Todos ('+completed+'/'+tasks.length+' done)</div>';
+      html += '<ul class="task-list">';
+      var taskIcons = { completed:'&#10003;', in_progress:'&#9654;', pending:'&#9675;' };
+      for (var tj = 0; tj < tasks.length; tj++) {
+        var t = tasks[tj];
+        var icon = taskIcons[t.status] || '&#9675;';
+        html += '<li class="task-item"><span class="task-icon '+t.status+'">'+icon+'</span><span class="task-text '+t.status+'">'+(t.activeForm || t.content)+'</span></li>';
       }
-      detailsHtml += '</ul>';
+      html += '</ul>';
+      html += '</div>';
     }
 
     // Files
-    if (a.files && a.files.length > 0) {
-      detailsHtml += '<div class="file-list"><div style="font-size:10px;color:var(--text-dim);margin:6px 0 4px;">Files ('+a.files.length+')</div>';
-      for (const f of a.files.slice(0,8)) {
-        detailsHtml += '<div class="file-item">&#128196; '+f+'</div>';
+    if (agent.files && agent.files.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Files ('+agent.files.length+')</div>';
+      for (var fi = 0; fi < agent.files.length; fi++) {
+        html += '<div class="file-item">&#128196; '+agent.files[fi]+'</div>';
       }
-      if (a.files.length > 8) detailsHtml += '<div class="file-item" style="opacity:0.5">+ '+(a.files.length-8)+' more</div>';
-      detailsHtml += '</div>';
+      html += '</div>';
     }
 
     // Tools
-    if (a.tools && a.tools.length > 0) {
-      detailsHtml += '<div style="margin-top:6px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tools</div>';
-      detailsHtml += '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
-      for (const t of a.tools) {
-        detailsHtml += '<span style="font-size:9px;padding:2px 6px;background:var(--surface2);border-radius:3px;color:var(--text-dim);">'+t+'</span>';
+    if (agent.tools && agent.tools.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Tools</div>';
+      html += '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
+      for (var tl = 0; tl < agent.tools.length; tl++) {
+        html += '<span style="font-size:9px;padding:2px 6px;background:var(--surface2);border-radius:3px;color:var(--text-dim);">'+agent.tools[tl]+'</span>';
       }
-      detailsHtml += '</div>';
+      html += '</div>';
+      html += '</div>';
     }
 
-    detailsHtml += '</div>';
-
-    return '<div class="agent-card st-'+a.status+'" onclick="toggleAgent(this)">'+
-      '<div class="agent-top">'+
-        '<div class="agent-info">'+
-          '<div class="agent-name"><span class="agent-expand-icon">&#9656;</span> '+a.name+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
-          '<div class="agent-task">'+a.task+'</div>'+
-        '</div>'+
-        '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
-      '</div>'+
-      '<div class="agent-meta">'+
-        '<span>'+a.model+'</span>'+
-        '<span>'+a.elapsed+'</span>'+
-        (a.tokens?'<span>'+fmt(a.tokens)+' tokens</span>':'')+
-        (hasTasks?'<span>'+tasks.filter(t=>t.status==='completed').length+'/'+tasks.length+' tasks</span>':'')+
-        '<span style="opacity:0.5">via '+a.sourceProvider+'</span>'+
-      '</div>'+
-      (a.progress > 0
-        ? '<div class="progress-bar"><div class="pf pf-'+color+'" style="width:'+a.progress+'%"></div></div><div class="progress-label"><span>'+a.progressLabel+'</span><span>'+a.progress+'%</span></div>'
-        : active
-          ? '<div class="activity-indicator"></div><div class="progress-label"><span>'+a.progressLabel+'</span><span>'+a.elapsed+'</span></div>'
-          : ''
-      )+
-      detailsHtml+
-    '</div>';
-  }).join('');
-}
-
-function render(state) {
-  currentState = state;
-  const agents = state.agents || [];
-  const activities = state.activities || [];
-  const stats = state.stats || {};
-  const health = state.dataSourceHealth || [];
-
-  // Update live timestamp
-  lastUpdate = new Date();
-  const lt = document.getElementById('live-time');
-  if (lt) lt.textContent = 'Updated ' + lastUpdate.toLocaleTimeString();
-
-  // Stats
-  document.getElementById('stats').innerHTML =
-    '<div class="stat-card"><div class="stat-label">Total Agents</div><div class="stat-value">'+stats.total+'</div><div class="stat-sub">across '+health.filter(h=>h.state==='connected').length+' sources</div></div>'+
-    '<div class="stat-card"><div class="stat-label">Active Now</div><div class="stat-value" style="color:var(--green)">'+stats.active+'</div><div class="stat-sub">running + thinking</div></div>'+
-    '<div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value" style="color:var(--blue)">'+stats.completed+'</div><div class="stat-sub">this session</div></div>'+
-    '<div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value">'+fmt(stats.tokens)+'</div><div class="stat-sub">~$'+(stats.estimatedCost||0).toFixed(2)+'</div></div>'+
-    '<div class="stat-card"><div class="stat-label">Data Sources</div><div class="stat-value" style="color:var(--cyan)">'+health.filter(h=>h.state==='connected').length+'/'+health.length+'</div><div class="stat-sub">connected</div></div>';
-
-  // Agents (with search & filter)
-  renderAgents(agents);
-
-  // Activity
-  const actEl = document.getElementById('activity');
-  if (!activities.length) {
-    actEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-dim);font-size:10px;">Waiting for activity...</div>';
-  } else {
-    actEl.innerHTML = activities.slice(0,20).map(a =>
-      '<div class="act-item"><div class="act-dot '+dc(a.type)+'"></div><div class="act-content"><div class="act-agent">'+a.agent+'</div><div class="act-desc">'+a.desc+'</div></div><div class="act-time">'+a.timeLabel+'</div></div>'
-    ).join('');
+    body.innerHTML = html;
+    document.getElementById('detail-panel').classList.add('open');
+    document.getElementById('detail-overlay').classList.add('open');
   }
 
-  // Source toggle
-  const sel = document.getElementById('source-select');
-  if (sel && state.primarySource) sel.value = state.primarySource;
+  function closeDetailPanel() {
+    activePanelAgentId = null;
+    document.getElementById('detail-panel').classList.remove('open');
+    document.getElementById('detail-overlay').classList.remove('open');
+  }
 
-  // Data sources
-  document.getElementById('datasources').innerHTML = health.map(h => {
-    const isWarn = h.state === 'degraded';
-    return '<div class="ds-item">'+
-      '<div class="ds-dot ds-'+h.state+'"></div>'+
-      '<div style="flex:1;min-width:0">'+
-        '<div class="ds-name">'+h.name+'</div>'+
-        '<div class="ds-msg'+(isWarn?' warn':'')+'">'+h.message+'</div>'+
-      '</div>'+
-      (h.agentCount?'<div class="ds-count">'+h.agentCount+'</div>':'')+
-    '</div>';
-  }).join('');
-}
+  function applyFilter() {
+    if (currentState) renderAgents(currentState.agents || []);
+  }
 
-window.addEventListener('message', e => {
-  if (e.data.type === 'update') render(e.data.state);
-});
+  function renderFilterChips(agents) {
+    var counts = {};
+    for (var i = 0; i < agents.length; i++) counts[agents[i].status] = (counts[agents[i].status]||0) + 1;
+    var statuses = ['running','thinking','paused','done','error','queued'];
+    var labels = {running:'Running',thinking:'Thinking',paused:'Paused',done:'Done',error:'Error',queued:'Queued'};
+    var html = '<button class="filter-chip'+(activeStatusFilter===null?' active':'')+'" data-status="">All <span class="chip-count">'+agents.length+'</span></button>';
+    for (var j = 0; j < statuses.length; j++) {
+      var s = statuses[j];
+      if (counts[s]) {
+        html += '<button class="filter-chip'+(activeStatusFilter===s?' active':'')+'" data-status="'+s+'">'+labels[s]+' <span class="chip-count">'+counts[s]+'</span></button>';
+      }
+    }
+    document.getElementById('filter-chips').innerHTML = html;
+  }
 
-render({ agents:[], activities:[], stats:{total:0,active:0,completed:0,tokens:0,estimatedCost:0,avgDuration:'—'}, dataSourceHealth:[] });
+  function renderAgents(agents) {
+    var searchEl = document.getElementById('search-input');
+    var searchTerm = (searchEl.value || '').toLowerCase().trim();
+    renderFilterChips(agents);
+
+    var filtered = agents;
+    if (activeStatusFilter) filtered = filtered.filter(function(a) { return a.status === activeStatusFilter; });
+    if (searchTerm) filtered = filtered.filter(function(a) {
+      return a.name.toLowerCase().indexOf(searchTerm) !== -1 ||
+        a.task.toLowerCase().indexOf(searchTerm) !== -1 ||
+        a.model.toLowerCase().indexOf(searchTerm) !== -1 ||
+        a.typeLabel.toLowerCase().indexOf(searchTerm) !== -1 ||
+        a.sourceProvider.toLowerCase().indexOf(searchTerm) !== -1 ||
+        (a.tasks||[]).some(function(t) { return (t.content||'').toLowerCase().indexOf(searchTerm) !== -1 || (t.activeForm||'').toLowerCase().indexOf(searchTerm) !== -1; });
+    });
+
+    document.getElementById('agent-count').textContent = filtered.length !== agents.length
+      ? filtered.length+' of '+agents.length
+      : (agents.length ? agents.length+' total' : '');
+
+    var el = document.getElementById('agents');
+    if (!filtered.length) {
+      el.innerHTML = agents.length
+        ? '<div class="empty-state"><div class="icon">&#128269;</div><p>No agents match your filter</p><div class="hint">Try a different search term or clear the filter</div></div>'
+        : '<div class="empty-state"><div class="icon">&#9881;</div><p>No agent sessions detected</p><div class="hint">Check Data Sources below for connection status</div></div>';
+      return;
+    }
+
+    el.innerHTML = filtered.map(function(a) {
+      var color = sc(a.status);
+      var active = a.status==='running'||a.status==='thinking';
+      var loc = a.remoteHost || (a.location.charAt(0).toUpperCase()+a.location.slice(1));
+      var tasks = a.tasks || [];
+      var hasTasks = tasks.length > 0;
+      var taskIcons = { completed:'&#10003;', in_progress:'&#9654;', pending:'&#9675;' };
+
+      var detailsHtml = '<div class="agent-details">';
+      detailsHtml += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+a.model+'</span></div>';
+      detailsHtml += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+a.sourceProvider+'</span></div>';
+      detailsHtml += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
+      if (a.pid) detailsHtml += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+a.pid+'</span></div>';
+      if (a.activeTool) detailsHtml += '<div class="detail-row"><span class="detail-label">Active</span><span class="detail-value">'+a.activeTool+'</span></div>';
+
+      if (hasTasks) {
+        var completed = tasks.filter(function(t) { return t.status==='completed'; }).length;
+        detailsHtml += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tasks ('+completed+'/'+tasks.length+' done)</div>';
+        detailsHtml += '<ul class="task-list">';
+        for (var ti = 0; ti < tasks.length; ti++) {
+          var t = tasks[ti];
+          var icon = taskIcons[t.status] || '&#9675;';
+          detailsHtml += '<li class="task-item"><span class="task-icon '+t.status+'">'+icon+'</span><span class="task-text '+t.status+'">'+(t.activeForm || t.content)+'</span></li>';
+        }
+        detailsHtml += '</ul>';
+      }
+
+      if (a.files && a.files.length > 0) {
+        detailsHtml += '<div class="file-list"><div style="font-size:10px;color:var(--text-dim);margin:6px 0 4px;">Files ('+a.files.length+')</div>';
+        var showFiles = a.files.slice(0,8);
+        for (var fi = 0; fi < showFiles.length; fi++) {
+          detailsHtml += '<div class="file-item">&#128196; '+showFiles[fi]+'</div>';
+        }
+        if (a.files.length > 8) detailsHtml += '<div class="file-item" style="opacity:0.5">+ '+(a.files.length-8)+' more</div>';
+        detailsHtml += '</div>';
+      }
+
+      if (a.tools && a.tools.length > 0) {
+        detailsHtml += '<div style="margin-top:6px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tools</div>';
+        detailsHtml += '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
+        for (var tl = 0; tl < a.tools.length; tl++) {
+          detailsHtml += '<span style="font-size:9px;padding:2px 6px;background:var(--surface2);border-radius:3px;color:var(--text-dim);">'+a.tools[tl]+'</span>';
+        }
+        detailsHtml += '</div>';
+      }
+
+      detailsHtml += '</div>';
+
+      return '<div class="agent-card st-'+a.status+'">'+
+        '<div class="agent-top">'+
+          '<div class="agent-info">'+
+            '<div class="agent-name">'+a.name+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
+            '<div class="agent-task">'+a.task+'</div>'+
+          '</div>'+
+          '<div class="agent-right">'+
+            '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
+            '<button class="panel-toggle-btn" data-agent-id="'+a.id+'"><span class="arrow">&#9656;</span> Details</button>'+
+          '</div>'+
+        '</div>'+
+        '<div class="agent-meta">'+
+          '<span>'+a.model+'</span>'+
+          '<span>'+a.elapsed+'</span>'+
+          (a.tokens?'<span>'+fmt(a.tokens)+' tokens</span>':'')+
+          (hasTasks?'<span>'+tasks.filter(function(t) { return t.status==='completed'; }).length+'/'+tasks.length+' tasks</span>':'')+
+          '<span style="opacity:0.5">via '+a.sourceProvider+'</span>'+
+        '</div>'+
+        (a.progress > 0
+          ? '<div class="progress-bar"><div class="pf pf-'+color+'" style="width:'+a.progress+'%"></div></div><div class="progress-label"><span>'+a.progressLabel+'</span><span>'+a.progress+'%</span></div>'
+          : active
+            ? '<div class="activity-indicator"></div><div class="progress-label"><span>'+a.progressLabel+'</span><span>'+a.elapsed+'</span></div>'
+            : ''
+        )+
+        '<div style="margin-top:6px;"><button class="agent-toggle-btn"><span class="arrow">&#9662;</span> '+(hasTasks ? tasks.filter(function(t){return t.status==="completed";}).length+'/'+tasks.length+' tasks' : 'More info')+'</button></div>'+
+        detailsHtml+
+      '</div>';
+    }).join('');
+  }
+
+  function render(state) {
+    currentState = state;
+    var agents = state.agents || [];
+    var activities = state.activities || [];
+    var stats = state.stats || {};
+    var health = state.dataSourceHealth || [];
+
+    lastUpdate = new Date();
+    var lt = document.getElementById('live-time');
+    if (lt) lt.textContent = 'Updated ' + lastUpdate.toLocaleTimeString();
+
+    document.getElementById('stats').innerHTML =
+      '<div class="stat-card"><div class="stat-label">Total Agents</div><div class="stat-value">'+stats.total+'</div><div class="stat-sub">across '+health.filter(function(h) { return h.state==='connected'; }).length+' sources</div></div>'+
+      '<div class="stat-card"><div class="stat-label">Active Now</div><div class="stat-value" style="color:var(--green)">'+stats.active+'</div><div class="stat-sub">running + thinking</div></div>'+
+      '<div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value" style="color:var(--blue)">'+stats.completed+'</div><div class="stat-sub">this session</div></div>'+
+      '<div class="stat-card"><div class="stat-label">Tokens</div><div class="stat-value">'+fmt(stats.tokens)+'</div><div class="stat-sub">~$'+(stats.estimatedCost||0).toFixed(2)+'</div></div>'+
+      '<div class="stat-card"><div class="stat-label">Data Sources</div><div class="stat-value" style="color:var(--cyan)">'+health.filter(function(h) { return h.state==='connected'; }).length+'/'+health.length+'</div><div class="stat-sub">connected</div></div>';
+
+    renderAgents(agents);
+
+    var actEl = document.getElementById('activity');
+    if (!activities.length) {
+      actEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-dim);font-size:10px;">Waiting for activity...</div>';
+    } else {
+      actEl.innerHTML = activities.slice(0,20).map(function(a) {
+        return '<div class="act-item"><div class="act-dot '+dc(a.type)+'"></div><div class="act-content"><div class="act-agent">'+a.agent+'</div><div class="act-desc">'+a.desc+'</div></div><div class="act-time">'+a.timeLabel+'</div></div>';
+      }).join('');
+    }
+
+    var sel = document.getElementById('source-select');
+    if (sel && state.primarySource) sel.value = state.primarySource;
+
+    document.getElementById('datasources').innerHTML = health.map(function(h) {
+      var isWarn = h.state === 'degraded';
+      return '<div class="ds-item">'+
+        '<div class="ds-dot ds-'+h.state+'"></div>'+
+        '<div style="flex:1;min-width:0">'+
+          '<div class="ds-name">'+h.name+'</div>'+
+          '<div class="ds-msg'+(isWarn?' warn':'')+'">'+h.message+'</div>'+
+        '</div>'+
+        (h.agentCount?'<div class="ds-count">'+h.agentCount+'</div>':'')+
+      '</div>';
+    }).join('');
+  }
+
+  window.addEventListener('message', function(e) {
+    if (e.data && e.data.type === 'update') {
+      try {
+        render(e.data.state);
+      } catch (err) {
+        document.getElementById('agents').innerHTML = '<div class="empty-state"><div class="icon" style="color:var(--red);">&#9888;</div><p>Render error: '+err.message+'</p><div class="hint">'+err.stack+'</div></div>';
+      }
+    }
+  });
+
+  // Initial render with empty state
+  render({ agents:[], activities:[], stats:{total:0,active:0,completed:0,tokens:0,estimatedCost:0,avgDuration:'---'}, dataSourceHealth:[] });
+  document.getElementById('agents').innerHTML = '<div class="empty-state"><div class="icon">&#9203;</div><p>Waiting for data from providers...</p><div class="hint">Requesting data...</div></div>';
+  send('refresh');
+})();
 </script>
 </body>
 </html>`;

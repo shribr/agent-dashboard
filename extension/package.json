@@ -2,8 +2,12 @@
   "name": "agent-dashboard",
   "displayName": "Agent Dashboard",
   "description": "Real-time visual monitoring dashboard for AI coding agents — Copilot, Claude Code, and more",
-  "version": "0.5.0",
-  "publisher": "ami",
+  "version": "0.8.0",
+  "publisher": "amischreiber",
+  "author": {
+    "name": "Ami Schreiber",
+    "email": "ami.schreiber@live.com"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
