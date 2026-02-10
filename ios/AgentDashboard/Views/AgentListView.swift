@@ -281,6 +281,8 @@ struct ProviderChip: View {
             Text(label)
                 .font(.caption2)
                 .fontWeight(isSelected ? .semibold : .regular)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(isSelected ? Color.cyan.opacity(0.15) : Color(.tertiarySystemFill))
@@ -304,85 +306,113 @@ struct AgentCard: View {
     var onShowConversation: (() -> Void)? = nil
     var onFilterProvider: ((String) -> Void)? = nil
 
+    /// Strips GUID suffixes from agent names (e.g., "Copilot Chat 832ec6..." -> "Copilot Chat")
+    private var displayName: String {
+        let name = agent.name
+        // Pattern: if name ends with a hex string (8+ chars), strip it
+        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
+            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        return name
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Header
-            HStack {
+            // Header row 1: Status icon, name, and status badge
+            HStack(alignment: .top) {
                 // Status icon
                 Image(systemName: agent.status.iconName)
                     .foregroundStyle(statusColor)
                     .font(.title3)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.name)
+                VStack(alignment: .leading, spacing: 4) {
+                    // Agent name
+                    Text(displayName)
                         .font(.headline)
                         .lineLimit(1)
 
-                    HStack(spacing: 8) {
+                    // Type and location labels
+                    HStack(spacing: 6) {
                         Label(agent.typeLabel, systemImage: agentTypeIcon)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
 
                         Label(agent.location.rawValue.capitalized, systemImage: agent.location.iconName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-
-                        if let onFilterProvider = onFilterProvider {
-                            Button {
-                                onFilterProvider(agent.sourceProvider)
-                            } label: {
-                                Text(AgentListView.friendlyProviderName(agent.sourceProvider))
-                                    .font(.caption2)
-                                    .foregroundStyle(.cyan)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.cyan.opacity(0.1))
-                                    .clipShape(Capsule())
-                            }
-                        }
+                            .lineLimit(1)
                     }
                 }
 
                 Spacer()
 
-                // Status badge + details button
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text(agent.status.displayName)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(statusColor.opacity(0.15))
-                        .foregroundStyle(statusColor)
-                        .clipShape(Capsule())
+                // Status badge (right side)
+                Text(agent.status.displayName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.15))
+                    .foregroundStyle(statusColor)
+                    .clipShape(Capsule())
+                    .lineLimit(1)
+                    .fixedSize()
+            }
 
-                    HStack(spacing: 6) {
-                        if let onConvo = onShowConversation {
-                            let hasHistory = agent.hasConversationHistory ?? false
-                            Button(action: onConvo) {
-                                Label("Chat", systemImage: "bubble.left.and.bubble.right")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
-                                    .foregroundStyle(hasHistory ? .blue : .secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(hasHistory ? Color.blue.opacity(0.1) : Color(.tertiarySystemFill))
-                                    .clipShape(Capsule())
-                            }
-                            .disabled(!hasHistory)
-                            .opacity(hasHistory ? 1.0 : 0.4)
-                        }
+            // Header row 2: Action buttons (Chat, Details) + Source provider chip
+            HStack(spacing: 8) {
+                // Source provider chip
+                if let onFilterProvider = onFilterProvider {
+                    Button {
+                        onFilterProvider(agent.sourceProvider)
+                    } label: {
+                        Text(AgentListView.friendlyProviderName(agent.sourceProvider))
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.cyan)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.cyan.opacity(0.1))
+                            .clipShape(Capsule())
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
 
-                        Button(action: onShowDetails) {
-                            Label("Details", systemImage: "chevron.right")
+                Spacer()
+
+                // Action buttons
+                HStack(spacing: 6) {
+                    if let onConvo = onShowConversation {
+                        let hasHistory = agent.hasConversationHistory ?? false
+                        Button(action: onConvo) {
+                            Label("Chat", systemImage: "bubble.left.and.bubble.right")
                                 .font(.caption2)
                                 .fontWeight(.medium)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(hasHistory ? .blue : .secondary)
                                 .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Color(.tertiarySystemFill))
+                                .padding(.vertical, 4)
+                                .background(hasHistory ? Color.blue.opacity(0.1) : Color(.tertiarySystemFill))
                                 .clipShape(Capsule())
+                                .lineLimit(1)
+                                .fixedSize()
                         }
+                        .disabled(!hasHistory)
+                        .opacity(hasHistory ? 1.0 : 0.5)
+                    }
+
+                    Button(action: onShowDetails) {
+                        Label("Details", systemImage: "chevron.right")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(.tertiarySystemFill))
+                            .clipShape(Capsule())
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                 }
             }
