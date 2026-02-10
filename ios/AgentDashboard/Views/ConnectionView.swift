@@ -112,7 +112,7 @@ struct ConnectionView: View {
                     Text("Port")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("19850", value: $service.localPort, format: .number)
+                    TextField("19850", value: $service.localPort, formatter: NumberFormatter())
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.numberPad)
                         .frame(width: 80)
