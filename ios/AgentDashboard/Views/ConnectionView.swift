@@ -149,7 +149,7 @@ struct ConnectionView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    ForEach(service.discoveredHosts, id: \.self) { host in
+                    ForEach(Array(service.discoveredHosts.enumerated()), id: \.offset) { _, host in
                         Button {
                             service.localHost = host
                         } label: {

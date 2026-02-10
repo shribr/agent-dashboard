@@ -147,6 +147,25 @@ class DashboardService: ObservableObject {
         }
     }
 
+    // MARK: - Conversation History
+
+    func fetchConversationHistory(agentId: String) async -> [ConversationTurn] {
+        let encoded = agentId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? agentId
+        let urlString = "\(baseURL)/api/agents/\(encoded)/conversation"
+        guard let url = URL(string: urlString) else { return [] }
+
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else { return [] }
+            let result = try JSONDecoder().decode(ConversationResponse.self, from: data)
+            return result.turns
+        } catch {
+            print("[DashboardService] Conversation fetch error: \(error.localizedDescription)")
+            return []
+        }
+    }
+
     // MARK: - Discovery (scan local network for API server)
 
     func scanLocalNetwork() async {

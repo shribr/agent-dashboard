@@ -20,6 +20,13 @@ interface AgentAction {
   status: 'running' | 'done' | 'error';
 }
 
+interface ConversationTurn {
+  role: 'user' | 'assistant' | 'system';
+  content: string;       // Full message text — no truncation
+  timestamp?: number;
+  toolCalls?: { name: string; detail: string; result?: string; isError?: boolean }[];
+}
+
 interface AgentSession {
   id: string;
   name: string;
@@ -44,6 +51,7 @@ interface AgentSession {
   recentActions?: AgentAction[];
   parentId?: string;
   conversationPreview?: string[];  // Recent conversation snippets for the detail panel
+  hasConversationHistory?: boolean; // True if full conversation history can be loaded on demand
 }
 
 interface ActivityItem {
@@ -95,6 +103,7 @@ abstract class DataProvider {
   protected _agents: AgentSession[] = [];
   protected _activities: ActivityItem[] = [];
   protected _outputChannel: vscode.OutputChannel;
+  protected _agentFilePaths: Map<string, string> = new Map();
 
   constructor(outputChannel: vscode.OutputChannel) {
     this._outputChannel = outputChannel;
@@ -113,6 +122,7 @@ abstract class DataProvider {
 
   get agents(): AgentSession[] { return this._agents; }
   get activities(): ActivityItem[] { return this._activities; }
+  get agentFilePaths(): Map<string, string> { return this._agentFilePaths; }
 
   /**
    * Safely fetch data. ALL errors are caught here — providers never throw.
@@ -143,6 +153,14 @@ abstract class DataProvider {
   }
 
   protected abstract fetch(): Promise<void>;
+
+  /**
+   * Load full conversation history for an agent.
+   * Override in providers that support conversation history (Copilot Chat, Claude Code).
+   */
+  async getConversationHistory(_agentId: string): Promise<ConversationTurn[]> {
+    return [];
+  }
 
   protected isApiChangeError(err: any): boolean {
     const msg = err?.message || '';
@@ -474,7 +492,8 @@ class CopilotExtensionProvider extends DataProvider {
         files: [],
         location: 'local',
         sourceProvider: this.id,
-        conversationPreview: conversationHints
+        conversationPreview: conversationHints,
+        hasConversationHistory: conversationHints.length > 0  // Enable chat button when we have context to show
       });
 
     } catch (err: any) {
@@ -609,40 +628,57 @@ class CopilotChatSessionProvider extends DataProvider {
 
     this._outputChannel.appendLine(`[${this.id}] Processing ${sessionFiles.length} session file(s)...`);
     const now = Date.now();
-    // Use a generous 24-hour window — show sessions from the whole day
-    const RECENT_MS = 24 * 60 * 60 * 1000;
-    let skippedOld = 0;
+    const ACTIVE_MS = 5 * 60 * 1000;       // 5 min → considered "running"
+    const MAX_PARSE = 15;                    // Parse up to 15 most recent files per poll
     let parsed = 0;
     let errors = 0;
 
+    // Sort all session files by modification time (most recent first)
+    const filesWithStats: { path: string; mtime: number; size: number }[] = [];
     for (const filePath of sessionFiles) {
       try {
         const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > RECENT_MS) { skippedOld++; continue; }
+        filesWithStats.push({ path: filePath, mtime: stat.mtimeMs, size: stat.size });
+      } catch { /* skip */ }
+    }
+    filesWithStats.sort((a, b) => b.mtime - a.mtime);
 
-        const raw = fs.readFileSync(filePath, 'utf-8');
-        // Guard against very large files (> 5MB) that could slow down polling
-        if (raw.length > 5 * 1024 * 1024) {
-          this._outputChannel.appendLine(`[${this.id}] Skipping large file (${(raw.length/1024/1024).toFixed(1)}MB): ${filePath}`);
+    // ALWAYS store file paths for ALL session files (enables on-demand conversation loading)
+    // This is critical — even old files have browsable conversation history
+    for (const f of filesWithStats) {
+      const sessionId = path.basename(f.path, '.json');
+      const agentId = `copilot-session-${sessionId.substring(0, 12)}`;
+      this._agentFilePaths.set(agentId, f.path);
+    }
+    this._outputChannel.appendLine(`[${this.id}] Stored ${filesWithStats.length} file path(s) for conversation history`);
+
+    // Parse the most recent files for agent cards and activity data
+    for (const f of filesWithStats.slice(0, MAX_PARSE)) {
+      try {
+        if (f.size > 5 * 1024 * 1024) {
+          this._outputChannel.appendLine(`[${this.id}] Skipping large file (${(f.size/1024/1024).toFixed(1)}MB): ${f.path}`);
           continue;
         }
 
+        const raw = fs.readFileSync(f.path, 'utf-8');
         const data = JSON.parse(raw);
-        this.parseSessionData(data, filePath, stat.mtimeMs);
+        this.parseSessionData(data, f.path, f.mtime);
         parsed++;
       } catch (err: any) {
         errors++;
-        this._outputChannel.appendLine(`[${this.id}] Error parsing ${filePath}: ${err?.message}`);
+        this._outputChannel.appendLine(`[${this.id}] Error parsing ${f.path}: ${err?.message}`);
       }
     }
 
-    this._outputChannel.appendLine(`[${this.id}] Results: ${parsed} parsed, ${skippedOld} skipped (old), ${errors} errors → ${this._agents.length} agents`);
+    this._outputChannel.appendLine(`[${this.id}] Results: ${parsed} parsed, ${errors} errors → ${this._agents.length} agents (${filesWithStats.length} total files on disk)`);
 
     this._state = 'connected';
     if (this._agents.length > 0) {
-      this._message = `${this._agents.length} session(s) with detailed activity (from ${parsed} files)`;
+      this._message = `${this._agents.length} session(s) from ${parsed} files (${filesWithStats.length} total on disk)`;
+    } else if (filesWithStats.length > 0) {
+      this._message = `${filesWithStats.length} session files on disk — conversation history available via Chat button`;
     } else {
-      this._message = `Found ${sessionFiles.length} files (${parsed} recent) but no agent activity detected.`;
+      this._message = `No session files found.`;
     }
   }
 
@@ -970,8 +1006,13 @@ class CopilotChatSessionProvider extends DataProvider {
     const isActive = ageMs < 5 * 60 * 1000; // Active if modified in last 5 min
 
     // Create main session agent
+    const agentId = `copilot-session-${sessionId.substring(0, 12)}`;
+
+    // Store file path mapping for on-demand conversation loading
+    this._agentFilePaths.set(agentId, filePath);
+
     this._agents.push({
-      id: `copilot-session-${sessionId.substring(0, 12)}`,
+      id: agentId,
       name: data.title || `Copilot Chat ${sessionId.substring(0, 8)}`,
       type: 'copilot',
       typeLabel: subagents.length > 0 ? 'Agent Swarm' : 'Copilot Chat',
@@ -992,8 +1033,9 @@ class CopilotChatSessionProvider extends DataProvider {
       files: Array.from(filesAccessed).slice(0, 20),
       location: 'local',
       sourceProvider: this.id,
-      recentActions: recentActions.slice(-30), // Last 30 actions
-      conversationPreview: conversationSnippets.slice(-15), // Last 15 conversation lines
+      recentActions: recentActions.slice(-30),
+      conversationPreview: conversationSnippets.slice(-15),
+      hasConversationHistory: true,
     });
 
     // Create entries for each detected subagent
@@ -1187,6 +1229,122 @@ class CopilotChatSessionProvider extends DataProvider {
     if (n.includes('subagent') || n.includes('task') || n.includes('delegate') || n.includes('spawn')) return 'Subagent';
     if (n.includes('list') || n.includes('ls') || n.includes('dir')) return 'List';
     return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  /**
+   * Load FULL conversation history from a Copilot Chat session file.
+   * Called on-demand when the user clicks "Chat" on an agent card.
+   */
+  async getConversationHistory(agentId: string): Promise<ConversationTurn[]> {
+    const filePath = this._agentFilePaths.get(agentId);
+    if (!filePath) {
+      this._outputChannel.appendLine(`[${this.id}] No file path for agent ${agentId}`);
+      return [];
+    }
+
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      const requests = data.requests || data.turns || data.messages || data.exchanges || [];
+      if (!Array.isArray(requests)) return [];
+
+      const turns: ConversationTurn[] = [];
+      const sessionMtime = fs.statSync(filePath).mtimeMs;
+
+      for (const req of requests) {
+        // ── User message ──
+        const prompt = typeof req.prompt === 'string' ? req.prompt
+          : (req.prompt?.text || req.prompt?.value || req.message?.text || req.message?.value
+            || (typeof req.message === 'string' ? req.message : '') || req.text || req.query || '');
+        if (prompt) {
+          turns.push({ role: 'user', content: prompt, timestamp: sessionMtime });
+        }
+
+        // ── Assistant response ──
+        const responseParts = Array.isArray(req.response) ? req.response : [];
+        let assistantText = '';
+        const toolCalls: ConversationTurn['toolCalls'] = [];
+
+        for (const part of responseParts) {
+          if (!part || !part.type) continue;
+
+          if (part.type === 'markdown' && part.markdown?.value) {
+            assistantText += part.markdown.value;
+          }
+
+          if (part.type === 'toolCall' && part.toolCall) {
+            const tc = part.toolCall;
+            const toolName = tc.toolName || tc.name || 'Tool';
+            const input = tc.toolInput || tc.input || tc.arguments || {};
+            const result = tc.toolResult;
+            const detail = this.formatToolDetail(this.normalizeToolName(toolName), input);
+            let resultText = '';
+            if (result) {
+              if (typeof result === 'string') resultText = result;
+              else if (result.output) resultText = String(result.output);
+              else if (result.stdout) resultText = String(result.stdout);
+              else { try { resultText = JSON.stringify(result).substring(0, 500); } catch { /* skip */ } }
+            }
+            toolCalls.push({
+              name: toolName,
+              detail,
+              result: resultText || undefined,
+              isError: result?.exitCode ? result.exitCode !== 0 : false
+            });
+          }
+
+          if (part.type === 'progressMessage' && part.progressMessage?.message) {
+            // Include progress as part of assistant text
+            assistantText += `\n[${part.progressMessage.message}]\n`;
+          }
+        }
+
+        // Handle older object-style responses
+        if (!Array.isArray(req.response) && req.response) {
+          const resp = req.response;
+          const text = typeof resp.value === 'string' ? resp.value : (resp.text || resp.message || '');
+          if (text) assistantText += text;
+
+          const blocks = resp.value || resp.parts || resp.content || [];
+          if (Array.isArray(blocks)) {
+            for (const block of blocks) {
+              if ((block.kind === 'toolCall' || block.type === 'tool_use') && (block.toolName || block.name)) {
+                toolCalls.push({
+                  name: block.toolName || block.name || 'Tool',
+                  detail: this.formatToolDetail(block.toolName || block.name || 'Tool', block.input || block.arguments || {}),
+                });
+              }
+            }
+          }
+        }
+
+        // Check result object too
+        if (req.result?.message) {
+          const resultMsg = req.result.message;
+          if (typeof resultMsg === 'string') assistantText += '\n' + resultMsg;
+          else if (Array.isArray(resultMsg)) {
+            for (const p of resultMsg) {
+              if (p.value) assistantText += '\n' + p.value;
+            }
+          }
+        }
+
+        if (assistantText.trim() || toolCalls.length > 0) {
+          turns.push({
+            role: 'assistant',
+            content: assistantText.trim(),
+            timestamp: sessionMtime,
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+          });
+        }
+      }
+
+      this._outputChannel.appendLine(`[${this.id}] Loaded ${turns.length} conversation turns for ${agentId}`);
+      return turns;
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Error loading conversation for ${agentId}: ${err?.message}`);
+      return [];
+    }
   }
 }
 
@@ -1677,8 +1835,11 @@ class ClaudeDesktopTodosProvider extends DataProvider {
                 const isActive2 = (now - jstat.mtimeMs) < 5 * 60 * 1000;
                 const totalTokens = totalInputTokens + totalOutputTokens;
 
+                const claudeAgentId = `claude-code-${sessionId}`;
+                this._agentFilePaths.set(claudeAgentId, jf.path);
+
                 this._agents.push({
-                  id: `claude-code-${sessionId}`,
+                  id: claudeAgentId,
                   name: `Claude Code ${sessionId}`,
                   type: 'claude',
                   typeLabel: 'Claude Code',
@@ -1697,6 +1858,7 @@ class ClaudeDesktopTodosProvider extends DataProvider {
                   sourceProvider: this.id,
                   recentActions: actions.slice(-30),
                   conversationPreview: convoSnippets.slice(-15),
+                  hasConversationHistory: true,
                 });
 
                 if (isActive2) activeCount++;
@@ -1731,6 +1893,127 @@ class ClaudeDesktopTodosProvider extends DataProvider {
     if (n === 'ls' || n === 'list') return 'List';
     if (n === 'webfetch' || n === 'websearch') return 'Web';
     return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  /**
+   * Load FULL conversation history from a Claude Code JSONL session file.
+   * Called on-demand when the user clicks "Chat" on an agent card.
+   */
+  async getConversationHistory(agentId: string): Promise<ConversationTurn[]> {
+    const filePath = this._agentFilePaths.get(agentId);
+    if (!filePath) {
+      this._outputChannel.appendLine(`[${this.id}] No file path for agent ${agentId}`);
+      return [];
+    }
+
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const lines = raw.split('\n').filter(l => l.trim().length > 0);
+      const turns: ConversationTurn[] = [];
+
+      let currentAssistantText = '';
+      let currentToolCalls: ConversationTurn['toolCalls'] = [];
+      let lastTimestamp = Date.now();
+
+      // Helper to flush any accumulated assistant content
+      const flushAssistant = () => {
+        if (currentAssistantText.trim() || (currentToolCalls && currentToolCalls.length > 0)) {
+          turns.push({
+            role: 'assistant',
+            content: currentAssistantText.trim(),
+            timestamp: lastTimestamp,
+            toolCalls: currentToolCalls && currentToolCalls.length > 0 ? currentToolCalls : undefined
+          });
+          currentAssistantText = '';
+          currentToolCalls = [];
+        }
+      };
+
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line);
+          const content = msg.message?.content;
+          if (!Array.isArray(content)) continue;
+
+          const msgTimestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : lastTimestamp;
+          lastTimestamp = msgTimestamp;
+
+          if (msg.type === 'user') {
+            // Flush any previous assistant content
+            flushAssistant();
+
+            // Collect all text blocks from user message
+            let userText = '';
+            for (const block of content) {
+              if (block.type === 'text' && block.text) {
+                userText += (userText ? '\n' : '') + block.text;
+              }
+            }
+            if (userText) {
+              turns.push({ role: 'user', content: userText, timestamp: msgTimestamp });
+            }
+          }
+
+          if (msg.type === 'assistant') {
+            for (const block of content) {
+              if (block.type === 'text' && block.text) {
+                currentAssistantText += (currentAssistantText ? '\n' : '') + block.text;
+              }
+              if (block.type === 'tool_use') {
+                const toolName = block.name || 'Tool';
+                const input = block.input || {};
+                let detail = '';
+                const fp = input.file_path || input.filePath || '';
+                if (fp) {
+                  detail = path.basename(fp);
+                  if (input.offset) detail += `, line ${input.offset}`;
+                } else if (input.command) {
+                  detail = String(input.command).substring(0, 200);
+                } else if (input.pattern) {
+                  detail = `pattern: ${input.pattern}`;
+                } else if (input.query) {
+                  detail = String(input.query).substring(0, 200);
+                } else if (input.content) {
+                  detail = '(file content)';
+                } else {
+                  detail = toolName;
+                }
+                if (!currentToolCalls) currentToolCalls = [];
+                currentToolCalls.push({
+                  name: toolName,
+                  detail,
+                  isError: false
+                });
+              }
+              if (block.type === 'tool_result') {
+                // Attach result to the most recent tool call
+                if (currentToolCalls && currentToolCalls.length > 0) {
+                  const lastTool = currentToolCalls[currentToolCalls.length - 1];
+                  if (block.is_error) lastTool.isError = true;
+                  if (block.content) {
+                    if (typeof block.content === 'string') {
+                      lastTool.result = block.content.substring(0, 1000);
+                    } else if (Array.isArray(block.content)) {
+                      const texts = block.content.filter((c: any) => c.type === 'text').map((c: any) => c.text);
+                      lastTool.result = texts.join('\n').substring(0, 1000);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch { /* skip malformed line */ }
+      }
+
+      // Flush remaining assistant content
+      flushAssistant();
+
+      this._outputChannel.appendLine(`[${this.id}] Loaded ${turns.length} conversation turns for ${agentId}`);
+      return turns;
+    } catch (err: any) {
+      this._outputChannel.appendLine(`[${this.id}] Error loading conversation for ${agentId}: ${err?.message}`);
+      return [];
+    }
   }
 }
 
@@ -2462,6 +2745,11 @@ class DashboardProvider {
           await this.refresh();
         }
         break;
+      case 'loadConversation':
+        if (msg.agentId) {
+          await this.loadConversationHistory(msg.agentId);
+        }
+        break;
       case 'pause':
       case 'resume':
       case 'stop':
@@ -2471,6 +2759,62 @@ class DashboardProvider {
         );
         break;
     }
+  }
+
+  /**
+   * Load full conversation history for an agent and send it to the webview.
+   */
+  private async loadConversationHistory(agentId: string): Promise<void> {
+    try {
+      // Find which provider owns this agent
+      let turns: ConversationTurn[] = [];
+      for (const provider of this.providers) {
+        if (provider.agents.some(a => a.id === agentId)) {
+          turns = await provider.getConversationHistory(agentId);
+          break;
+        }
+      }
+
+      // If no provider found by agent ID, try checking the merged agent case
+      // (basic copilot-active may have conversation from session provider)
+      if (turns.length === 0) {
+        for (const provider of this.providers) {
+          const providerTurns = await provider.getConversationHistory(agentId);
+          if (providerTurns.length > 0) {
+            turns = providerTurns;
+            break;
+          }
+        }
+      }
+
+      this.outputChannel.appendLine(`[dashboard] Sending ${turns.length} conversation turns for ${agentId}`);
+      this.panel?.webview.postMessage({ type: 'conversation', agentId, turns });
+    } catch (err: any) {
+      this.outputChannel.appendLine(`[dashboard] Error loading conversation: ${err?.message}`);
+      this.panel?.webview.postMessage({
+        type: 'conversationError',
+        agentId,
+        error: err?.message || 'Failed to load conversation'
+      });
+    }
+  }
+
+  /** Conversation lookup for the REST API (same logic as loadConversationHistory but returns data) */
+  private async getConversationForApi(agentId: string): Promise<ConversationTurn[]> {
+    let turns: ConversationTurn[] = [];
+    for (const provider of this.providers) {
+      if (provider.agents.some(a => a.id === agentId)) {
+        turns = await provider.getConversationHistory(agentId);
+        break;
+      }
+    }
+    if (turns.length === 0) {
+      for (const provider of this.providers) {
+        const t = await provider.getConversationHistory(agentId);
+        if (t.length > 0) { turns = t; break; }
+      }
+    }
+    return turns;
   }
 
   async refresh() {
@@ -2556,6 +2900,27 @@ class DashboardProvider {
       agentMap.delete(mostRecent.id);
 
       // Also keep any remaining rich agents (older sessions) as separate cards
+    }
+
+    // ── Conversation history availability pass ──
+    // Set hasConversationHistory on basic copilot agents when ANY provider has session file paths.
+    // This ensures the Chat button is enabled even when session files are old.
+    for (const provider of this.providers) {
+      const filePaths = provider.agentFilePaths;
+      if (filePaths && filePaths.size > 0) {
+        // This provider has conversation data available
+        for (const [, agent] of agentMap) {
+          if ((agent.type === 'copilot' || agent.type === 'claude') && !agent.hasConversationHistory) {
+            // Find the most recent file path from this provider
+            const firstEntry = filePaths.entries().next().value;
+            if (firstEntry) {
+              agent.hasConversationHistory = true;
+              // Also store a file path mapping for this agent so loadConversation works
+              filePaths.set(agent.id, firstEntry[1]);
+            }
+          }
+        }
+      }
     }
 
     // Persist first-seen times and update elapsed for each agent
@@ -2742,12 +3107,27 @@ class DashboardProvider {
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.9.2', uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', version: '0.9.3', uptime: process.uptime() }));
+        return;
+      }
+
+      // Conversation history endpoint: /api/agents/{agentId}/conversation
+      const convoMatch = req.url?.match(/^\/api\/agents\/([^/]+)\/conversation$/);
+      if (convoMatch && req.method === 'GET') {
+        const agentId = decodeURIComponent(convoMatch[1]);
+        this.outputChannel.appendLine(`[api] Conversation request for ${agentId}`);
+        this.getConversationForApi(agentId).then(turns => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ agentId, turns }));
+        }).catch((err: any) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err?.message || 'Failed to load conversation' }));
+        });
         return;
       }
 
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found', endpoints: ['/api/state', '/api/health'] }));
+      res.end(JSON.stringify({ error: 'Not found', endpoints: ['/api/state', '/api/health', '/api/agents/{id}/conversation'] }));
     });
 
     this.apiServer.listen(port, '0.0.0.0', () => {
@@ -3089,6 +3469,9 @@ function getWebviewContent(webview: vscode.Webview): string {
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
   .btn { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:5px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:10px; cursor:pointer; font-weight:500; transition:all 0.15s; font-family:inherit; }
   .btn:hover { border-color:var(--accent); color:var(--text); }
+  .btn-refreshing { opacity:0.6; pointer-events:none; }
+  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+  .btn-refreshing::first-letter { display:inline-block; animation:spin 0.8s linear infinite; }
 
   .stats-row { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:18px; }
   .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:12px; position:relative; overflow:hidden; }
@@ -3252,6 +3635,58 @@ function getWebviewContent(webview: vscode.Webview): string {
   .provider-chip.active { background:var(--cyan); background:rgba(0,206,201,0.12); border-color:var(--cyan); color:var(--cyan); font-weight:600; }
 
   @media (max-width:900px) { .main-grid { grid-template-columns:1fr; } .stats-row { grid-template-columns:repeat(3,1fr); } }
+
+  /* ─── Conversation History Modal ─── */
+  .convo-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:200; display:none; align-items:center; justify-content:center; }
+  .convo-overlay.open { display:flex; }
+  .convo-panel { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:88%; max-width:920px; height:82vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,0.4); }
+  .convo-header { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); flex-shrink:0; gap:12px; }
+  .convo-title-row { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
+  .convo-title-row h3 { font-size:13px; font-weight:600; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .convo-back-btn { display:inline-flex; align-items:center; padding:4px 10px; border-radius:5px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:10px; cursor:pointer; font-family:inherit; transition:all 0.15s; flex-shrink:0; }
+  .convo-back-btn:hover { border-color:var(--accent); color:var(--text); }
+  .convo-controls { display:flex; gap:8px; align-items:center; flex-shrink:0; }
+  .convo-search { padding:4px 10px; border-radius:5px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:10px; width:150px; font-family:inherit; outline:none; }
+  .convo-search:focus { border-color:var(--accent); }
+  .convo-close-x { padding:4px 8px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:13px; cursor:pointer; font-family:inherit; line-height:1; }
+  .convo-close-x:hover { border-color:var(--accent); color:var(--text); }
+  .convo-body { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .convo-body::-webkit-scrollbar { width:5px; }
+  .convo-body::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+  .convo-loading { display:flex; flex-direction:column; align-items:center; gap:12px; padding:40px; color:var(--text-dim); font-size:12px; }
+  .convo-spinner { width:24px; height:24px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; }
+  @keyframes spin { 100% { transform:rotate(360deg); } }
+  .convo-empty { text-align:center; padding:40px; color:var(--text-dim); font-size:12px; }
+  .msg { display:flex; gap:10px; align-items:flex-start; }
+  .msg.msg-user { flex-direction:row-reverse; }
+  .msg-avatar { width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; flex-shrink:0; }
+  .msg.msg-assistant .msg-avatar { background:var(--accent-glow); color:var(--accent); }
+  .msg.msg-user .msg-avatar { background:var(--green-glow); color:var(--green); }
+  .msg-bubble { max-width:75%; border-radius:10px; padding:10px 14px; border:1px solid var(--border); }
+  .msg.msg-assistant .msg-bubble { background:var(--surface2); border-top-left-radius:2px; }
+  .msg.msg-user .msg-bubble { background:rgba(0,184,148,0.08); border-color:rgba(0,184,148,0.25); border-top-right-radius:2px; }
+  .msg-role { font-size:9px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
+  .msg.msg-assistant .msg-role { color:var(--accent); }
+  .msg.msg-user .msg-role { color:var(--green); }
+  .msg-text { font-size:12px; line-height:1.55; color:var(--text); white-space:pre-wrap; word-break:break-word; }
+  .msg-text pre { background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--accent); padding:8px 10px; margin:8px 0; border-radius:4px; overflow-x:auto; font-size:11px; line-height:1.4; font-family:'Cascadia Code','Fira Code',Consolas,monospace; white-space:pre-wrap; }
+  .msg-text code { background:var(--surface2); padding:1px 4px; border-radius:3px; font-family:'Cascadia Code','Fira Code',Consolas,monospace; font-size:0.9em; }
+  .msg-tools { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+  .msg-tool { background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--green); border-radius:4px; padding:6px 10px; font-size:10px; }
+  .msg-tool-header { display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .msg-tool-name { color:var(--green); font-weight:600; }
+  .msg-tool-detail { color:var(--text-dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .msg-tool-status { font-size:9px; }
+  .msg-tool-result { margin-top:4px; padding-top:4px; border-top:1px solid var(--border); font-size:10px; color:var(--text-dim); white-space:pre-wrap; max-height:120px; overflow-y:auto; font-family:'Cascadia Code','Fira Code',Consolas,monospace; }
+  .msg-tool.error { border-left-color:var(--red); }
+  .msg-tool.error .msg-tool-name { color:var(--red); }
+  .convo-btn { background:var(--accent-glow); border-color:rgba(108,92,231,0.3); color:var(--accent); }
+  .convo-btn:hover:not(.convo-disabled) { background:rgba(108,92,231,0.2); border-color:var(--accent); color:var(--text); }
+  .convo-btn.convo-disabled { opacity:0.35; cursor:default; }
+  /* Awaiting user input — red pulse */
+  @keyframes awaiting-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(255,60,60,0); } 50% { box-shadow:0 0 12px 3px rgba(255,60,60,0.35); } }
+  .bubble-awaiting { border-color:rgba(255,60,60,0.5) !important; animation:awaiting-pulse 2s ease-in-out infinite; }
+  .msg-awaiting-badge { display:inline-flex; align-items:center; gap:4px; margin-top:8px; padding:4px 10px; font-size:10px; font-weight:600; color:#ff3c3c; background:rgba(255,60,60,0.08); border:1px solid rgba(255,60,60,0.25); border-radius:12px; }
 </style>
 </head>
 <body>
@@ -3259,7 +3694,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.9.2</span></h1>
+      <h1>Agent Dashboard <span>v0.9.3</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -3306,6 +3741,26 @@ function getWebviewContent(webview: vscode.Webview): string {
   </div>
   <div class="detail-panel-body" id="detail-panel-body"></div>
 </div>
+<div class="convo-overlay" id="convo-overlay">
+  <div class="convo-panel">
+    <div class="convo-header">
+      <div class="convo-title-row">
+        <button class="convo-back-btn" id="convo-close-btn">&#8592; Back</button>
+        <h3 id="convo-title">Conversation</h3>
+      </div>
+      <div class="convo-controls">
+        <input type="text" id="convo-search" class="convo-search" placeholder="Search messages..." />
+        <button class="convo-close-x" id="convo-close-x">&#10005;</button>
+      </div>
+    </div>
+    <div class="convo-body" id="convo-body">
+      <div class="convo-loading">
+        <div class="convo-spinner"></div>
+        <div>Loading conversation...</div>
+      </div>
+    </div>
+  </div>
+</div>
 <script nonce="${nonce}">
 (function() {
   // Global error handler — display errors visibly in the webview
@@ -3324,7 +3779,15 @@ function getWebviewContent(webview: vscode.Webview): string {
   var activeProviderFilter = null;
 
   // ── Event listeners for static elements (replacing inline handlers) ──
-  document.getElementById('btn-refresh').addEventListener('click', function() { send('refresh'); });
+  document.getElementById('btn-refresh').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.classList.add('btn-refreshing');
+    btn.innerHTML = '&#8635; Refreshing...';
+    send('refresh');
+    // Re-enable after data arrives or timeout
+    setTimeout(function() { btn.disabled = false; btn.classList.remove('btn-refreshing'); btn.innerHTML = '&#8635; Refresh'; }, 4000);
+  });
   document.getElementById('btn-log').addEventListener('click', function() { send('openLog'); });
   document.getElementById('source-select').addEventListener('change', function() { send('switchSource', { source: this.value }); });
   document.getElementById('search-input').addEventListener('input', function() { applyFilter(); });
@@ -3355,11 +3818,20 @@ function getWebviewContent(webview: vscode.Webview): string {
       if (card) card.classList.toggle('expanded');
       return;
     }
+    // Open conversation history modal (skip if disabled)
+    var convoBtn = e.target.closest('.convo-btn');
+    if (convoBtn) {
+      if (convoBtn.classList.contains('convo-disabled')) return;
+      var agentId = convoBtn.getAttribute('data-agent-id');
+      var agentName = convoBtn.getAttribute('data-agent-name') || 'Conversation';
+      if (agentId) openConversation(agentId, agentName);
+      return;
+    }
     // Open slide-out panel on the panel toggle button
     var panelBtn = e.target.closest('.panel-toggle-btn');
     if (panelBtn) {
-      var agentId = panelBtn.getAttribute('data-agent-id');
-      if (agentId) openDetailPanel(agentId);
+      var agentId2 = panelBtn.getAttribute('data-agent-id');
+      if (agentId2) openDetailPanel(agentId2);
       return;
     }
   });
@@ -3378,6 +3850,18 @@ function getWebviewContent(webview: vscode.Webview): string {
   document.getElementById('detail-panel-close').addEventListener('click', function() { closeDetailPanel(); });
   document.getElementById('detail-overlay').addEventListener('click', function() { closeDetailPanel(); });
 
+  // Close conversation modal
+  document.getElementById('convo-close-btn').addEventListener('click', function() { closeConversation(); });
+  document.getElementById('convo-close-x').addEventListener('click', function() { closeConversation(); });
+  document.getElementById('convo-overlay').addEventListener('click', function(e) {
+    if (e.target === document.getElementById('convo-overlay')) closeConversation();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && convoOpen) closeConversation();
+  });
+  // Conversation search
+  document.getElementById('convo-search').addEventListener('input', function() { filterConversation(this.value); });
+
   // Parent link click in detail panel
   document.getElementById('detail-panel-body').addEventListener('click', function(e) {
     var parentLink = e.target.closest('.parent-link');
@@ -3388,6 +3872,155 @@ function getWebviewContent(webview: vscode.Webview): string {
   });
 
   var activePanelAgentId = null;
+
+  // ── Conversation History Modal ──
+  var convoOpen = false;
+  var convoTurns = [];
+  var convoAgentId = null;
+  var convoAgentStatus = null; // Track agent status for "awaiting input" detection
+
+  function escHtml(t) {
+    return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function formatMsgText(text) {
+    var html = escHtml(text);
+    // Fenced code blocks: three-backtick blocks
+    var codeBlockRe = new RegExp(String.fromCharCode(96,96,96)+'(\\\\w*)\\\\n([\\\\s\\\\S]*?)'+String.fromCharCode(96,96,96), 'g');
+    html = html.replace(codeBlockRe, function(m, lang, code) {
+      return '<pre>' + code + '</pre>';
+    });
+    // Inline code: single backtick
+    var inlineRe = new RegExp(String.fromCharCode(96)+'([^'+String.fromCharCode(96)+']+)'+String.fromCharCode(96), 'g');
+    html = html.replace(inlineRe, '<code>$1</code>');
+    return html;
+  }
+
+  function openConversation(agentId, agentName) {
+    convoAgentId = agentId;
+    convoOpen = true;
+    convoTurns = [];
+    // Look up agent status for "awaiting input" detection
+    convoAgentStatus = null;
+    if (currentState && currentState.agents) {
+      for (var ai = 0; ai < currentState.agents.length; ai++) {
+        if (currentState.agents[ai].id === agentId) { convoAgentStatus = currentState.agents[ai].status; break; }
+      }
+    }
+    document.getElementById('convo-title').textContent = agentName || 'Conversation';
+    document.getElementById('convo-search').value = '';
+    document.getElementById('convo-body').innerHTML = '<div class="convo-loading"><div class="convo-spinner"></div><div>Loading conversation...</div></div>';
+    document.getElementById('convo-overlay').classList.add('open');
+    send('loadConversation', { agentId: agentId });
+  }
+
+  function closeConversation() {
+    convoOpen = false;
+    convoAgentId = null;
+    convoTurns = [];
+    document.getElementById('convo-overlay').classList.remove('open');
+  }
+
+  function renderConversation(turns) {
+    convoTurns = turns;
+    var container = document.getElementById('convo-body');
+    if (!turns || turns.length === 0) {
+      container.innerHTML = '<div class="convo-empty"><div style="font-size:24px;margin-bottom:8px;">&#128172;</div>No conversation history found.<br/><span style="font-size:10px;color:var(--text-dim);">Session files may not contain chat data, or the session may still be active in memory.</span></div>';
+      return;
+    }
+    renderConversationTurns(turns, container);
+    // Scroll to bottom
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function renderConversationTurns(turns, container) {
+    var html = '';
+    // Detect if agent is awaiting user input: status is running/thinking AND last message is from assistant
+    var isLive = convoAgentStatus === 'running' || convoAgentStatus === 'thinking';
+    var lastAssistantIdx = -1;
+    if (isLive) {
+      for (var li = turns.length - 1; li >= 0; li--) {
+        if (turns[li].role === 'assistant') { lastAssistantIdx = li; break; }
+      }
+      // Only mark "awaiting" if the very last message is from the assistant (not user)
+      if (lastAssistantIdx >= 0 && lastAssistantIdx !== turns.length - 1) lastAssistantIdx = -1;
+    }
+
+    for (var i = 0; i < turns.length; i++) {
+      var t = turns[i];
+      var roleClass = t.role === 'user' ? 'msg-user' : 'msg-assistant';
+      var avatar = t.role === 'user' ? '&#128100;' : '&#129302;';
+      var roleLabel = t.role === 'user' ? 'You' : 'Assistant';
+      var isAwaiting = (i === lastAssistantIdx);
+      html += '<div class="msg ' + roleClass + (isAwaiting ? ' msg-awaiting' : '') + '">';
+      html += '<div class="msg-avatar">' + avatar + '</div>';
+      html += '<div class="msg-bubble' + (isAwaiting ? ' bubble-awaiting' : '') + '">';
+      html += '<div class="msg-role">' + roleLabel + '</div>';
+      html += '<div class="msg-text">' + formatMsgText(t.content) + '</div>';
+
+      // "Awaiting input" banner
+      if (isAwaiting) {
+        html += '<div class="msg-awaiting-badge">&#9888; Agent is waiting for your input</div>';
+      }
+
+      // Tool calls
+      if (t.toolCalls && t.toolCalls.length > 0) {
+        html += '<div class="msg-tools">';
+        for (var j = 0; j < t.toolCalls.length; j++) {
+          var tc = t.toolCalls[j];
+          var errClass = tc.isError ? ' error' : '';
+          var statusIcon = tc.isError ? '&#10007;' : '&#10003;';
+          html += '<div class="msg-tool' + errClass + '">';
+          html += '<div class="msg-tool-header">';
+          html += '<span class="msg-tool-name">&#9881; ' + escHtml(tc.name) + '</span>';
+          html += '<span class="msg-tool-detail">' + escHtml(tc.detail) + '</span>';
+          html += '<span class="msg-tool-status">' + statusIcon + '</span>';
+          html += '</div>';
+          if (tc.result) {
+            html += '<div class="msg-tool-result">' + escHtml(tc.result) + '</div>';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+
+      html += '</div>'; // .msg-bubble
+      html += '</div>'; // .msg
+    }
+    container.innerHTML = html;
+  }
+
+  function filterConversation(query) {
+    if (!convoTurns || convoTurns.length === 0) return;
+    var container = document.getElementById('convo-body');
+    if (!query) {
+      renderConversationTurns(convoTurns, container);
+      return;
+    }
+    var q = query.toLowerCase();
+    var filtered = [];
+    for (var i = 0; i < convoTurns.length; i++) {
+      var t = convoTurns[i];
+      if (t.content && t.content.toLowerCase().indexOf(q) !== -1) {
+        filtered.push(t);
+      } else if (t.toolCalls) {
+        for (var j = 0; j < t.toolCalls.length; j++) {
+          var tc = t.toolCalls[j];
+          if ((tc.name && tc.name.toLowerCase().indexOf(q) !== -1) ||
+              (tc.detail && tc.detail.toLowerCase().indexOf(q) !== -1) ||
+              (tc.result && tc.result.toLowerCase().indexOf(q) !== -1)) {
+            filtered.push(t);
+            break;
+          }
+        }
+      }
+    }
+    if (filtered.length === 0) {
+      container.innerHTML = '<div class="convo-empty">No messages match &ldquo;' + escHtml(query) + '&rdquo;</div>';
+    } else {
+      renderConversationTurns(filtered, container);
+    }
+  }
 
   function openDetailPanel(agentId) {
     if (!currentState) return;
@@ -3688,6 +4321,7 @@ function getWebviewContent(webview: vscode.Webview): string {
           '</div>'+
           '<div class="agent-right">'+
             '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
+            ((a.type==='copilot'||a.type==='claude') ? '<button class="panel-toggle-btn convo-btn'+(a.hasConversationHistory?'':' convo-disabled')+'" data-agent-id="'+a.id+'" data-agent-name="'+escHtml(a.name)+'"'+(a.hasConversationHistory?'':' title="No saved conversation history yet"')+'>&#128172; Chat</button>' : '')+
             '<button class="panel-toggle-btn" data-agent-id="'+a.id+'"><span class="arrow">&#9656;</span> Details</button>'+
           '</div>'+
         '</div>'+
@@ -3762,10 +4396,24 @@ function getWebviewContent(webview: vscode.Webview): string {
 
   window.addEventListener('message', function(e) {
     if (e.data && e.data.type === 'update') {
+      // Reset refresh button when data arrives
+      var rb = document.getElementById('btn-refresh');
+      if (rb) { rb.disabled = false; rb.classList.remove('btn-refreshing'); rb.innerHTML = '&#8635; Refresh'; }
       try {
         render(e.data.state);
       } catch (err) {
         document.getElementById('agents').innerHTML = '<div class="empty-state"><div class="icon" style="color:var(--red);">&#9888;</div><p>Render error: '+err.message+'</p><div class="hint">'+err.stack+'</div></div>';
+      }
+    }
+    // Conversation history response
+    if (e.data && e.data.type === 'conversation') {
+      if (convoOpen && e.data.agentId === convoAgentId) {
+        renderConversation(e.data.turns || []);
+      }
+    }
+    if (e.data && e.data.type === 'conversationError') {
+      if (convoOpen && e.data.agentId === convoAgentId) {
+        document.getElementById('convo-body').innerHTML = '<div class="convo-empty" style="color:var(--red);">&#9888; '+escHtml(e.data.error||'Failed to load conversation')+'</div>';
       }
     }
   });
@@ -3777,7 +4425,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   // Mark that the script loaded successfully
   var dbg = document.createElement('div');
   dbg.style.cssText = 'position:fixed;bottom:4px;left:4px;font-size:8px;color:rgba(139,143,163,0.3);pointer-events:none;z-index:999;';
-  dbg.textContent = 'v0.9.2 loaded';
+  dbg.textContent = 'v0.9.3 loaded';
   document.body.appendChild(dbg);
 })();
 </script>

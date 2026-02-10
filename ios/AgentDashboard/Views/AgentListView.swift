@@ -1,11 +1,24 @@
 import SwiftUI
 
+enum AgentSheetType: Identifiable {
+    case detail(AgentSession)
+    case conversation(AgentSession)
+
+    var id: String {
+        switch self {
+        case .detail(let a): return "detail-\(a.id)"
+        case .conversation(let a): return "convo-\(a.id)"
+        }
+    }
+}
+
 struct AgentListView: View {
     let agents: [AgentSession]
+    @EnvironmentObject var service: DashboardService
     @State private var filter: AgentStatus? = nil
     @State private var providerFilter: String? = nil
     @State private var expandedAgent: String? = nil
-    @State private var detailAgent: AgentSession? = nil
+    @State private var presentedSheet: AgentSheetType? = nil
     @State private var searchText: String = ""
 
     var filteredAgents: [AgentSession] {
@@ -189,8 +202,9 @@ struct AgentListView: View {
                                     }
                                 },
                                 onShowDetails: {
-                                    detailAgent = agent
+                                    presentedSheet = .detail(agent)
                                 },
+                                onShowConversation: Self.conversationAction(for: agent, setter: { self.presentedSheet = $0 }),
                                 onFilterProvider: { providerId in
                                     withAnimation(.easeInOut(duration: 0.2)) {
                                         providerFilter = providerFilter == providerId ? nil : providerId
@@ -204,9 +218,20 @@ struct AgentListView: View {
                 }
             }
         }
-        .sheet(item: $detailAgent) { agent in
-            AgentDetailPanel(agent: agent)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .detail(let agent):
+                AgentDetailPanel(agent: agent)
+            case .conversation(let agent):
+                ConversationView(agent: agent, service: service)
+            }
         }
+    }
+
+    /// Returns a conversation action closure for agents that support chat, or nil otherwise
+    private static func conversationAction(for agent: AgentSession, setter: @escaping (AgentSheetType) -> Void) -> (() -> Void)? {
+        guard agent.type == .copilot || agent.type == .claude else { return nil }
+        return { setter(.conversation(agent)) }
     }
 
     private var activeStatuses: [AgentStatus] {
@@ -276,6 +301,7 @@ struct AgentCard: View {
     let isExpanded: Bool
     let onToggleExpand: () -> Void
     let onShowDetails: () -> Void
+    var onShowConversation: (() -> Void)? = nil
     var onFilterProvider: ((String) -> Void)? = nil
 
     var body: some View {
@@ -330,15 +356,33 @@ struct AgentCard: View {
                         .foregroundStyle(statusColor)
                         .clipShape(Capsule())
 
-                    Button(action: onShowDetails) {
-                        Label("Details", systemImage: "chevron.right")
-                            .font(.caption2)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color(.tertiarySystemFill))
-                            .clipShape(Capsule())
+                    HStack(spacing: 6) {
+                        if let onConvo = onShowConversation {
+                            let hasHistory = agent.hasConversationHistory ?? false
+                            Button(action: onConvo) {
+                                Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                                    .font(.caption2)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(hasHistory ? .blue : .secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(hasHistory ? Color.blue.opacity(0.1) : Color(.tertiarySystemFill))
+                                    .clipShape(Capsule())
+                            }
+                            .disabled(!hasHistory)
+                            .opacity(hasHistory ? 1.0 : 0.4)
+                        }
+
+                        Button(action: onShowDetails) {
+                            Label("Details", systemImage: "chevron.right")
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color(.tertiarySystemFill))
+                                .clipShape(Capsule())
+                        }
                     }
                 }
             }
@@ -463,7 +507,7 @@ struct AgentCard: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             FlowLayout(spacing: 4) {
-                                ForEach(agent.tools, id: \.self) { tool in
+                                ForEach(Array(agent.tools.enumerated()), id: \.offset) { _, tool in
                                     Text(tool)
                                         .font(.caption2)
                                         .padding(.horizontal, 8)
@@ -480,7 +524,7 @@ struct AgentCard: View {
                             Text("Files (\(agent.files.count))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            ForEach(agent.files.prefix(5), id: \.self) { file in
+                            ForEach(Array(agent.files.prefix(5).enumerated()), id: \.offset) { _, file in
                                 HStack(spacing: 4) {
                                     Image(systemName: "doc.text")
                                         .font(.caption2)
@@ -671,7 +715,7 @@ struct AgentDetailPanel: View {
                                 .foregroundStyle(.secondary)
                                 .tracking(0.5)
 
-                            ForEach(agent.files, id: \.self) { file in
+                            ForEach(Array(agent.files.enumerated()), id: \.offset) { _, file in
                                 HStack(spacing: 6) {
                                     Image(systemName: "doc.text")
                                         .font(.caption)
@@ -696,7 +740,7 @@ struct AgentDetailPanel: View {
                                 .tracking(0.5)
 
                             FlowLayout(spacing: 6) {
-                                ForEach(agent.tools, id: \.self) { tool in
+                                ForEach(Array(agent.tools.enumerated()), id: \.offset) { _, tool in
                                     Text(tool)
                                         .font(.caption)
                                         .padding(.horizontal, 10)
@@ -838,6 +882,294 @@ struct AgentDetailPanel: View {
             return String(format: "%.1fK", Double(tokens) / 1_000)
         }
         return "\(tokens)"
+    }
+}
+
+// MARK: - Conversation History View
+
+struct ConversationView: View {
+    let agent: AgentSession
+    let service: DashboardService
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var turns: [ConversationTurn] = []
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+    @State private var searchText: String = ""
+
+    /// Detect if the agent is likely waiting for user input:
+    /// status is running/thinking AND the last message is from the assistant (not user).
+    private var isAwaitingInput: Bool {
+        guard agent.status == .running || agent.status == .thinking else { return false }
+        guard let lastTurn = turns.last else { return false }
+        return lastTurn.isAssistant
+    }
+
+    var filteredTurns: [ConversationTurn] {
+        if searchText.isEmpty { return turns }
+        let term = searchText.lowercased()
+        return turns.filter { turn in
+            turn.content.lowercased().contains(term) ||
+            (turn.toolCalls ?? []).contains(where: { $0.name.lowercased().contains(term) || $0.detail.lowercased().contains(term) })
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        Text("Loading conversation...")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error = errorMessage {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if turns.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("No conversation history found")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 12) {
+                                ForEach(Array(filteredTurns.enumerated()), id: \.offset) { index, turn in
+                                    ConversationBubble(
+                                        turn: turn,
+                                        isAwaitingInput: isAwaitingInput && index == filteredTurns.count - 1
+                                    )
+                                    .id(index)
+                                }
+                            }
+                            .padding()
+                        }
+                        .onAppear {
+                            if !filteredTurns.isEmpty {
+                                proxy.scrollTo(filteredTurns.count - 1, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Conversation")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search messages...")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(agent.name)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                        if isAwaitingInput {
+                            Text("Waiting for input")
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                        } else {
+                            Text("\(turns.count) messages")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .task {
+            await loadConversation()
+        }
+    }
+
+    private func loadConversation() async {
+        isLoading = true
+        errorMessage = nil
+        let result = await service.fetchConversationHistory(agentId: agent.id)
+        if result.isEmpty && !(agent.hasConversationHistory ?? false) {
+            errorMessage = "No conversation data available for this agent."
+        }
+        turns = result
+        isLoading = false
+    }
+}
+
+// MARK: - Conversation Bubble
+
+struct ConversationBubble: View {
+    let turn: ConversationTurn
+    let isAwaitingInput: Bool
+
+    @State private var showToolCalls = false
+    @State private var pulseOpacity: Double = 0.0
+
+    var body: some View {
+        VStack(alignment: turn.isUser ? .trailing : .leading, spacing: 4) {
+            // Role label
+            HStack(spacing: 4) {
+                Image(systemName: turn.isUser ? "person.fill" : turn.isSystem ? "gear" : "sparkles")
+                    .font(.caption2)
+                    .foregroundStyle(turn.isUser ? .purple : turn.isSystem ? .orange : .green)
+                Text(turn.isUser ? "You" : turn.isSystem ? "System" : "Assistant")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(turn.isUser ? .purple : turn.isSystem ? .orange : .green)
+
+                if let ts = turn.timestamp, ts > 0 {
+                    Text(formatTimestamp(ts))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            // Message bubble
+            Text(turn.content)
+                .font(.callout)
+                .foregroundStyle(turn.isUser ? .white : .primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(turn.isUser ? Color.purple : Color(.secondarySystemFill))
+                )
+                .overlay(
+                    // "Waiting for input" red pulse border
+                    Group {
+                        if isAwaitingInput && !turn.isUser {
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.red, lineWidth: 2)
+                                .opacity(pulseOpacity)
+                                .onAppear {
+                                    withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                                        pulseOpacity = 0.8
+                                    }
+                                }
+                        }
+                    }
+                )
+                .frame(maxWidth: 320, alignment: turn.isUser ? .trailing : .leading)
+
+            // "Awaiting input" badge
+            if isAwaitingInput && !turn.isUser {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .font(.caption2)
+                    Text("Agent is waiting for your input")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                }
+                .foregroundStyle(.red)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1))
+                .clipShape(Capsule())
+            }
+
+            // Tool calls (collapsible)
+            if let tools = turn.toolCalls, !tools.isEmpty {
+                Button {
+                    withAnimation(.spring(response: 0.25)) {
+                        showToolCalls.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showToolCalls ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                            .font(.caption2)
+                        Text("\(tools.count) tool call\(tools.count == 1 ? "" : "s")")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                        Image(systemName: showToolCalls ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8))
+                    }
+                    .foregroundStyle(.cyan)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.cyan.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+
+                if showToolCalls {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: toolIcon(tool.name))
+                                        .font(.caption2)
+                                        .foregroundStyle(.cyan)
+                                    Text(tool.name)
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.primary)
+                                    if tool.isError == true {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.red)
+                                    }
+                                }
+
+                                if !tool.detail.isEmpty {
+                                    Text(tool.detail)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(4)
+                                }
+
+                                if let result = tool.result, !result.isEmpty {
+                                    Text(result)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .lineLimit(3)
+                                        .padding(.leading, 8)
+                                }
+                            }
+                            .padding(8)
+                            .background(Color(.tertiarySystemFill))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                    .padding(.leading, 12)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: turn.isUser ? .trailing : .leading)
+    }
+
+    private func formatTimestamp(_ ts: Double) -> String {
+        let date = Date(timeIntervalSince1970: ts / 1000.0)
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func toolIcon(_ name: String) -> String {
+        switch name.lowercased() {
+        case "read": return "doc.text"
+        case "edit": return "pencil"
+        case "write": return "doc.badge.plus"
+        case "bash": return "terminal"
+        case "search", "grep", "glob": return "magnifyingglass"
+        case "task": return "arrow.triangle.branch"
+        default: return "wrench"
+        }
     }
 }
 

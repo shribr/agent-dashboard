@@ -126,6 +126,7 @@ struct AgentSession: Codable, Identifiable {
     let recentActions: [AgentAction]?
     let parentId: String?
     let conversationPreview: [String]?
+    let hasConversationHistory: Bool?
 }
 
 enum AgentType: String, Codable {
@@ -268,6 +269,35 @@ enum HealthState: String, Codable {
         case .checking: return "arrow.clockwise"
         }
     }
+}
+
+// MARK: - Conversation History
+
+struct ConversationToolCall: Codable, Identifiable {
+    let name: String
+    let detail: String
+    let result: String?
+    let isError: Bool?
+
+    var id: String { "\(name)-\(detail.prefix(40))" }
+}
+
+struct ConversationTurn: Codable, Identifiable {
+    let role: String       // "user", "assistant", "system"
+    let content: String
+    let timestamp: Double?
+    let toolCalls: [ConversationToolCall]?
+
+    var id: String { "\(role)-\(content.prefix(30))-\(timestamp ?? 0)" }
+
+    var isUser: Bool { role == "user" }
+    var isAssistant: Bool { role == "assistant" }
+    var isSystem: Bool { role == "system" }
+}
+
+struct ConversationResponse: Codable {
+    let agentId: String
+    let turns: [ConversationTurn]
 }
 
 // MARK: - Health Check Response
