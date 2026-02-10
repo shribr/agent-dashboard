@@ -299,24 +299,52 @@ struct AgentCard: View {
 
     /// Strips GUID suffixes from agent names (e.g., "Copilot Chat 832ec6..." -> "Copilot Chat")
     private var displayName: String {
-        let name = agent.name
-        // Pattern: if name ends with a hex string (8+ chars), strip it
-        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
-            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        var name = agent.name.trimmingCharacters(in: .whitespaces)
+        // Pattern: if name ends with a separator + hex string (6+ chars), strip it
+        // Handles space, underscore, dash as separators and trailing dots/whitespace
+        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
+            name = String(name[..<range.lowerBound])
         }
-        return name
+        return name.trimmingCharacters(in: .whitespaces)
     }
 
     /// Cleans task text by removing technical details like user IDs and access modes
     private var cleanedTask: String {
         var text = agent.task
-        // Remove patterns like "(id = GUID, accessMode = 0)" or "(Id = GUID..."
-        text = text.replacingOccurrences(of: #"\([Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)"#, with: "", options: .regularExpression)
+        // Remove patterns like "(Id = GUID, accessMode = 0)" or "user(Id = ...)"
+        text = text.replacingOccurrences(of: #"\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?"#, with: "", options: .regularExpression)
         // Remove standalone GUIDs
         text = text.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
+        // Remove "Additional Details: ..." and everything after
+        if let range = text.range(of: "Additional Details:", options: .caseInsensitive) {
+            text = String(text[..<range.lowerBound])
+        }
+        // Remove "IsDisabled=True" style patterns
+        text = text.replacingOccurrences(of: #"Is\w+=\w+,?\s*"#, with: "", options: .regularExpression)
         // Clean up double spaces
         text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
-        return text.trimmingCharacters(in: .whitespaces)
+        let cleaned = text.trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "Chat session" : cleaned
+    }
+    
+    /// Generate a summary from conversation preview or cleaned task
+    private var cardSummary: String {
+        // Prefer first user message from conversation preview
+        if let convo = agent.conversationPreview {
+            for line in convo {
+                if line.hasPrefix("👤") {
+                    var msg = String(line.dropFirst(1)).trimmingCharacters(in: .whitespaces)
+                    // Also clean the user message of technical details
+                    msg = msg.replacingOccurrences(of: #"\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?"#, with: "", options: .regularExpression)
+                    msg = msg.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
+                    msg = msg.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+                    if !msg.isEmpty && msg.count > 5 {
+                        return msg
+                    }
+                }
+            }
+        }
+        return cleanedTask
     }
 
     var body: some View {
@@ -420,8 +448,8 @@ struct AgentCard: View {
                 }
             }
 
-            // Task description (cleaned of technical IDs)
-            Text(cleanedTask)
+            // Task description (cleaned summary from conversation or task)
+            Text(cardSummary)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -510,11 +538,11 @@ struct AgentDetailPanel: View {
 
     /// Strips GUID suffixes from agent names
     private var displayName: String {
-        let name = agent.name
-        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
-            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        var name = agent.name.trimmingCharacters(in: .whitespaces)
+        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
+            name = String(name[..<range.lowerBound])
         }
-        return name
+        return name.trimmingCharacters(in: .whitespaces)
     }
 
     /// Format conversation date for display
@@ -808,11 +836,11 @@ struct ConversationView: View {
 
     /// Strips GUID suffixes from agent names for cleaner display
     private var displayAgentName: String {
-        let name = agent.name
-        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
-            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        var name = agent.name.trimmingCharacters(in: .whitespaces)
+        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
+            name = String(name[..<range.lowerBound])
         }
-        return name
+        return name.trimmingCharacters(in: .whitespaces)
     }
 
     /// Format conversation date for title

@@ -3893,6 +3893,17 @@ function getWebviewContent(webview: vscode.Webview): string {
       var parentId = parentLink.getAttribute('data-parent-id');
       if (parentId) openDetailPanel(parentId);
     }
+    // View full chat history link
+    var chatLink = e.target.closest('.view-chat-link');
+    if (chatLink) {
+      var agentId = chatLink.getAttribute('data-agent-id');
+      var agentName = chatLink.getAttribute('data-agent-name');
+      var startTime = chatLink.getAttribute('data-start-time');
+      if (agentId) {
+        closeDetailPanel();
+        openConversation(agentId, agentName, startTime);
+      }
+    }
   });
 
   var activePanelAgentId = null;
@@ -3909,7 +3920,11 @@ function getWebviewContent(webview: vscode.Webview): string {
 
   function stripGuid(name) {
     // Remove GUID suffixes like "Copilot Chat 832ec648" or "Claude Code abc123..."
-    return String(name || '').replace(/\s+[a-fA-F0-9]{6,}\.{0,3}$/, '').trim();
+    // Handles trailing whitespace and various separators (space, underscore, dash)
+    var s = String(name || '').trim();
+    // Match separator + hex GUID (6+ chars) at end, with optional trailing dots/whitespace
+    s = s.replace(/[\s_-]+[a-fA-F0-9]{6,}\.{0,3}\s*$/, '');
+    return s.trim();
   }
 
   function formatConversationDate(ts) {
@@ -3930,6 +3945,106 @@ function getWebviewContent(webview: vscode.Webview): string {
     } else {
       return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + timeStr;
     }
+  }
+
+  function generateConversationSummary(convo, task) {
+    // Generate a human-readable summary from conversation preview entries
+    // convo entries are prefixed with emojis: 👤 (user), 🤖 (assistant), 🔧 (tool), ⏳ (thinking)
+    var userMsgs = [];
+    var assistantMsgs = [];
+    var toolMentions = [];
+    
+    for (var i = 0; i < convo.length; i++) {
+      var line = convo[i];
+      if (line.indexOf('\uD83D\uDC64') === 0) { // 👤 user
+        userMsgs.push(line.substring(2).trim());
+      } else if (line.indexOf('\uD83E\uDD16') === 0) { // 🤖 assistant
+        assistantMsgs.push(line.substring(2).trim());
+      } else if (line.indexOf('\uD83D\uDD27') === 0) { // 🔧 tool
+        var toolName = line.substring(2).trim().split(':')[0];
+        if (toolMentions.indexOf(toolName) === -1) toolMentions.push(toolName);
+      }
+    }
+    
+    var parts = [];
+    
+    // Describe the conversation scope
+    var msgCount = userMsgs.length + assistantMsgs.length;
+    if (msgCount > 0) {
+      parts.push('This conversation had ' + userMsgs.length + ' user message' + (userMsgs.length !== 1 ? 's' : '') + ' and ' + assistantMsgs.length + ' AI response' + (assistantMsgs.length !== 1 ? 's' : '') + '.');
+    }
+    
+    // Extract the main topic from the first user message or task
+    var topic = '';
+    if (userMsgs.length > 0) {
+      topic = userMsgs[0];
+      // Truncate if too long
+      if (topic.length > 100) topic = topic.substring(0, 100) + '...';
+      parts.push('Started with: "' + escHtml(topic) + '"');
+    } else if (task && task.length > 0 && task !== '—') {
+      topic = task;
+      if (topic.length > 100) topic = topic.substring(0, 100) + '...';
+      parts.push('Topic: ' + escHtml(topic));
+    }
+    
+    // Mention tools used
+    if (toolMentions.length > 0) {
+      var toolStr = toolMentions.slice(0, 3).join(', ');
+      if (toolMentions.length > 3) toolStr += ' +' + (toolMentions.length - 3) + ' more';
+      parts.push('Tools used: ' + escHtml(toolStr));
+    }
+    
+    return parts.length > 0 ? parts.join(' ') : 'Conversation data available.';
+  }
+
+  function cleanTaskText(task) {
+    // Remove technical details from task text
+    if (!task || task === '—') return task;
+    var text = String(task);
+    // Remove patterns like "(Id = GUID, accessMode = 0)" or "user(Id = ...)"
+    text = text.replace(/\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?/g, '');
+    // Remove full GUID patterns
+    text = text.replace(/[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}/g, '');
+    // Remove "Additional Details: ..."
+    text = text.replace(/Additional Details:.*$/i, '');
+    // Remove "IsDisabled=True" etc
+    text = text.replace(/Is\w+=\w+,?\s*/g, '');
+    // Clean up double spaces and trim
+    text = text.replace(/\s{2,}/g, ' ').trim();
+    // Remove trailing "..." if we now have a short clean string
+    if (text.endsWith('...') && text.length < 50) text = text.replace(/\.+$/, '');
+    return text || '—';
+  }
+
+  function getAgentCardSummary(agent) {
+    // Generate a clean summary for the agent card
+    // Prefer conversation preview over raw task text
+    var convo = agent.conversationPreview || [];
+    
+    // If we have conversation preview, extract the first user message
+    for (var i = 0; i < convo.length; i++) {
+      var line = convo[i];
+      if (line.indexOf('\uD83D\uDC64') === 0) { // 👤 user message
+        var msg = line.substring(2).trim();
+        // Clean up GUID patterns from user messages too
+        msg = cleanTaskText(msg);
+        if (msg && msg !== '—' && msg.length > 5) {
+          // Truncate long messages
+          if (msg.length > 80) msg = msg.substring(0, 80) + '...';
+          return escHtml(msg);
+        }
+      }
+    }
+    
+    // Fall back to cleaned task text
+    var cleanedTask = cleanTaskText(agent.task);
+    if (cleanedTask && cleanedTask !== '—' && cleanedTask.length > 5) {
+      if (cleanedTask.length > 80) cleanedTask = cleanedTask.substring(0, 80) + '...';
+      return escHtml(cleanedTask);
+    }
+    
+    // Final fallback
+    return 'Chat session';
   }
 
   function formatMsgText(text) {
@@ -4097,9 +4212,8 @@ function getWebviewContent(webview: vscode.Webview): string {
 
     // Status & meta
     html += '<div class="detail-section">';
-    html += '<div class="detail-section-title">Status</div>';
-    html += '<div style="margin-bottom:6px;"><span class="sb sb-'+agent.status+'">'+agent.status.charAt(0).toUpperCase()+agent.status.slice(1)+'</span></div>';
-    html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+agent.task+'</span></div>';
+    html += '<div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:center;">Status <span class="sb sb-'+agent.status+'">'+agent.status.charAt(0).toUpperCase()+agent.status.slice(1)+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+escHtml(cleanTaskText(agent.task))+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+agent.model+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+agent.sourceProvider+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">'+(agent.startTime ? formatConversationDate(agent.startTime) : agent.elapsed)+'</span></div>';
@@ -4182,26 +4296,21 @@ function getWebviewContent(webview: vscode.Webview): string {
       html += '</div>';
     }
 
-    // Conversation Preview (human-readable chat content)
+    // Conversation Summary (AI-generated overview)
     var convo = agent.conversationPreview || [];
-    if (convo.length > 0) {
+    if (convo.length > 0 || agent.hasConversationHistory) {
       html += '<div class="detail-section">';
-      html += '<div class="detail-section-title">Conversation Preview ('+convo.length+' entries)</div>';
+      html += '<div class="detail-section-title">Conversation Summary</div>';
       if (agent.startTime) {
-        html += '<div style="font-size:9px;color:var(--text-dim);margin-bottom:6px;">From '+formatConversationDate(agent.startTime)+'</div>';
+        html += '<div style="font-size:9px;color:var(--text-dim);margin-bottom:6px;">'+formatConversationDate(agent.startTime)+'</div>';
       }
-      html += '<div style="display:flex;flex-direction:column;gap:3px;">';
-      for (var ci = 0; ci < convo.length; ci++) {
-        var line = convo[ci];
-        var bgColor = 'transparent';
-        var borderColor = 'var(--border)';
-        if (line.indexOf('\uD83D\uDC64') === 0) { bgColor = 'rgba(108,92,231,0.06)'; borderColor = 'var(--accent)'; }
-        else if (line.indexOf('\uD83E\uDD16') === 0) { bgColor = 'rgba(0,184,148,0.06)'; borderColor = 'var(--green)'; }
-        else if (line.indexOf('\uD83D\uDD27') === 0) { bgColor = 'rgba(0,206,201,0.06)'; borderColor = 'var(--cyan)'; }
-        else if (line.indexOf('\u23F3') === 0) { bgColor = 'rgba(243,156,18,0.06)'; borderColor = 'var(--orange)'; }
-        html += '<div style="font-size:10px;padding:4px 6px;background:'+bgColor+';border-left:2px solid '+borderColor+';border-radius:2px;word-break:break-word;line-height:1.4;color:var(--text);">'+line+'</div>';
+      // Generate a summary from the conversation preview
+      var summary = generateConversationSummary(convo, agent.task);
+      html += '<div style="font-size:11px;line-height:1.5;color:var(--text);padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px;">'+summary+'</div>';
+      // View full chat history link
+      if (agent.hasConversationHistory) {
+        html += '<a class="view-chat-link" data-agent-id="'+agent.id+'" data-agent-name="'+escHtml(stripGuid(agent.name))+'" data-start-time="'+(agent.startTime||'')+'" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--accent);cursor:pointer;text-decoration:none;">&#128172; View full chat history &rarr;</a>';
       }
-      html += '</div>';
       html += '</div>';
     }
 
@@ -4323,7 +4432,7 @@ function getWebviewContent(webview: vscode.Webview): string {
         '<div class="agent-top">'+
           '<div class="agent-info">'+
             '<div class="agent-name">'+stripGuid(a.name)+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
-            '<div class="agent-task">'+a.task+'</div>'+
+            '<div class="agent-task">'+getAgentCardSummary(a)+'</div>'+
           '</div>'+
           '<div class="agent-right">'+
             '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
