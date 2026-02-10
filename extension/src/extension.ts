@@ -3187,7 +3187,7 @@ class DashboardProvider {
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.9.3', uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', version: '0.9.4', uptime: process.uptime() }));
         return;
       }
 
