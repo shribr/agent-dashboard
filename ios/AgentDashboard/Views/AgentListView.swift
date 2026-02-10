@@ -214,7 +214,9 @@ struct AgentListView: View {
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .detail(let agent):
-                AgentDetailPanel(agent: agent)
+                AgentDetailPanel(agent: agent, onShowConversation: {
+                    presentedSheet = .conversation(agent)
+                })
             case .conversation(let agent):
                 ConversationView(agent: agent, service: service)
             }
@@ -297,54 +299,27 @@ struct AgentCard: View {
     var onShowConversation: (() -> Void)? = nil
     var onFilterProvider: ((String) -> Void)? = nil
 
-    /// Strips GUID suffixes from agent names (e.g., "Copilot Chat 832ec6..." -> "Copilot Chat")
+    /// Normalizes agent display name — Copilot Chat sessions just show "Copilot Chat"
     private var displayName: String {
-        var name = agent.name.trimmingCharacters(in: .whitespaces)
-        // Pattern: if name ends with a separator + hex string (6+ chars), strip it
-        // Handles space, underscore, dash as separators and trailing dots/whitespace
-        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
-            name = String(name[..<range.lowerBound])
+        let name = agent.name.trimmingCharacters(in: .whitespaces)
+        if name.lowercased().hasPrefix("copilot chat") {
+            return "Copilot Chat"
         }
-        return name.trimmingCharacters(in: .whitespaces)
+        return name
     }
 
-    /// Cleans task text by removing technical details like user IDs and access modes
-    private var cleanedTask: String {
-        var text = agent.task
-        // Remove patterns like "(Id = GUID, accessMode = 0)" or "user(Id = ...)"
-        text = text.replacingOccurrences(of: #"\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?"#, with: "", options: .regularExpression)
-        // Remove standalone GUIDs
-        text = text.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
-        // Remove "Additional Details: ..." and everything after
-        if let range = text.range(of: "Additional Details:", options: .caseInsensitive) {
-            text = String(text[..<range.lowerBound])
-        }
-        // Remove "IsDisabled=True" style patterns
-        text = text.replacingOccurrences(of: #"Is\w+=\w+,?\s*"#, with: "", options: .regularExpression)
-        // Clean up double spaces
-        text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
-        let cleaned = text.trimmingCharacters(in: .whitespaces)
-        return cleaned.isEmpty ? "Chat session" : cleaned
-    }
-    
-    /// Generate a summary from conversation preview or cleaned task
+    /// Task summary — uses server-provided smart summary, falls back to cleaning raw text
     private var cardSummary: String {
-        // Prefer first user message from conversation preview
-        if let convo = agent.conversationPreview {
-            for line in convo {
-                if line.hasPrefix("👤") {
-                    var msg = String(line.dropFirst(1)).trimmingCharacters(in: .whitespaces)
-                    // Also clean the user message of technical details
-                    msg = msg.replacingOccurrences(of: #"\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?"#, with: "", options: .regularExpression)
-                    msg = msg.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
-                    msg = msg.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
-                    if !msg.isEmpty && msg.count > 5 {
-                        return msg
-                    }
-                }
-            }
+        let text = agent.task.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty || text == "Chat session" {
+            return "Chat session"
         }
-        return cleanedTask
+        // Clean up any remaining technical artifacts
+        var cleaned = text
+        cleaned = cleaned.replacingOccurrences(of: #"\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?"#, with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "Chat session" : cleaned
     }
 
     var body: some View {
@@ -533,16 +508,26 @@ struct AgentCard: View {
 
 struct AgentDetailPanel: View {
     let agent: AgentSession
+    var onShowConversation: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
 
-    /// Strips GUID suffixes from agent names
+    /// Normalizes agent display name — Copilot Chat sessions just show "Copilot Chat"
     private var displayName: String {
-        var name = agent.name.trimmingCharacters(in: .whitespaces)
-        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
-            name = String(name[..<range.lowerBound])
+        let name = agent.name.trimmingCharacters(in: .whitespaces)
+        if name.lowercased().hasPrefix("copilot chat") {
+            return "Copilot Chat"
         }
-        return name.trimmingCharacters(in: .whitespaces)
+        return name
+    }
+
+    /// Task summary for display
+    private var taskSummary: String {
+        let text = agent.task.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty || text == "Chat session" {
+            return "Chat session"
+        }
+        return text
     }
 
     /// Format conversation date for display
@@ -566,7 +551,7 @@ struct AgentDetailPanel: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(displayName)
                                 .font(.headline)
-                            Text(agent.task)
+                            Text(taskSummary)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -737,40 +722,76 @@ struct AgentDetailPanel: View {
                         }
                     }
 
-                    // Conversation Preview
-                    if let convo = agent.conversationPreview, !convo.isEmpty {
+                    // Conversation Summary
+                    if agent.hasConversationHistory == true {
                         Divider()
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("CONVERSATION PREVIEW")
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("CONVERSATION")
                                 .font(.caption2)
                                 .fontWeight(.semibold)
                                 .foregroundStyle(.secondary)
                                 .tracking(0.5)
 
-                            ForEach(Array(convo.enumerated()), id: \.offset) { _, line in
-                                let isUser = line.hasPrefix("\u{1F464}")
-                                let isBot = line.hasPrefix("\u{1F916}")
-                                let isTool = line.hasPrefix("\u{1F527}")
-                                let isProgress = line.hasPrefix("\u{23F3}")
+                            // Show task summary as conversation context
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.purple)
+                                Text(taskSummary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(3)
+                            }
+                            .padding(8)
+                            .background(Color.purple.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                                HStack(alignment: .top, spacing: 6) {
-                                    Rectangle()
-                                        .fill(isUser ? Color.purple : isBot ? Color.green : isTool ? Color.cyan : Color.orange)
-                                        .frame(width: 2)
+                            // Conversation stats if preview data available
+                            if let convo = agent.conversationPreview, !convo.isEmpty {
+                                let userCount = convo.filter { $0.hasPrefix("\u{1F464}") }.count
+                                let botCount = convo.filter { $0.hasPrefix("\u{1F916}") }.count
+                                let toolCount = convo.filter { $0.hasPrefix("\u{1F527}") }.count
 
-                                    Text(line)
-                                        .font(.caption)
-                                        .foregroundStyle(isUser ? .primary : .secondary)
-                                        .lineLimit(3)
+                                HStack(spacing: 12) {
+                                    if userCount > 0 {
+                                        Label("\(userCount) prompts", systemImage: "person.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.purple)
+                                    }
+                                    if botCount > 0 {
+                                        Label("\(botCount) responses", systemImage: "sparkles")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
+                                    if toolCount > 0 {
+                                        Label("\(toolCount) tool calls", systemImage: "wrench")
+                                            .font(.caption2)
+                                            .foregroundStyle(.cyan)
+                                    }
                                 }
-                                .padding(.vertical, 2)
-                                .padding(.horizontal, 6)
-                                .background(
-                                    (isUser ? Color.purple : isBot ? Color.green : isTool ? Color.cyan : Color.orange)
-                                        .opacity(0.05)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+
+                            // Tappable link to open full conversation
+                            Button {
+                                dismiss()
+                                // Small delay to let detail sheet dismiss before opening conversation
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    onShowConversation?()
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                                        .font(.caption2)
+                                    Text("View full chat history")
+                                        .font(.caption2)
+                                        .fontWeight(.medium)
+                                }
+                                .foregroundStyle(.blue)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.blue.opacity(0.08))
+                                .clipShape(Capsule())
                             }
                         }
                     }
@@ -834,13 +855,13 @@ struct ConversationView: View {
     @State private var errorMessage: String?
     @State private var searchText: String = ""
 
-    /// Strips GUID suffixes from agent names for cleaner display
+    /// Normalizes agent display name — Copilot Chat sessions just show "Copilot Chat"
     private var displayAgentName: String {
-        var name = agent.name.trimmingCharacters(in: .whitespaces)
-        if let range = name.range(of: #"[\s_-]+[a-fA-F0-9]{6,}\.*\s*$"#, options: .regularExpression) {
-            name = String(name[..<range.lowerBound])
+        let name = agent.name.trimmingCharacters(in: .whitespaces)
+        if name.lowercased().hasPrefix("copilot chat") {
+            return "Copilot Chat"
         }
-        return name.trimmingCharacters(in: .whitespaces)
+        return name
     }
 
     /// Format conversation date for title
@@ -952,11 +973,21 @@ struct ConversationView: View {
     private func loadConversation() async {
         isLoading = true
         errorMessage = nil
-        let result = await service.fetchConversationHistory(agentId: agent.id)
-        if result.isEmpty && !(agent.hasConversationHistory ?? false) {
-            errorMessage = "No conversation data available for this agent."
+        do {
+            let result = try await service.fetchConversationHistory(agentId: agent.id)
+            if result.isEmpty {
+                errorMessage = "No conversation history found for this session."
+            }
+            turns = result
+        } catch let error as DecodingError {
+            print("[ConversationView] Decode error: \(error)")
+            errorMessage = "Failed to decode conversation data. The server response format may be incompatible."
+            turns = []
+        } catch {
+            print("[ConversationView] Fetch error: \(error)")
+            errorMessage = "Failed to load conversation: \(error.localizedDescription)"
+            turns = []
         }
-        turns = result
         isLoading = false
     }
 }

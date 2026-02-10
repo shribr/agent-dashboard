@@ -149,21 +149,32 @@ class DashboardService: ObservableObject {
 
     // MARK: - Conversation History
 
-    func fetchConversationHistory(agentId: String) async -> [ConversationTurn] {
+    func fetchConversationHistory(agentId: String) async throws -> [ConversationTurn] {
         let encoded = agentId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? agentId
         let urlString = "\(baseURL)/api/agents/\(encoded)/conversation"
-        guard let url = URL(string: urlString) else { return [] }
-
-        do {
-            let (data, response) = try await session.data(from: url)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else { return [] }
-            let result = try JSONDecoder().decode(ConversationResponse.self, from: data)
-            return result.turns
-        } catch {
-            print("[DashboardService] Conversation fetch error: \(error.localizedDescription)")
-            return []
+        guard let url = URL(string: urlString) else {
+            throw URLError(.badURL)
         }
+
+        let (data, response) = try await session.data(from: url)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard httpResponse.statusCode == 200 else {
+            print("[DashboardService] Conversation HTTP \(httpResponse.statusCode) for \(agentId)")
+            throw URLError(.badServerResponse)
+        }
+
+        // Log raw response for debugging
+        if let rawString = String(data: data, encoding: .utf8) {
+            let preview = rawString.prefix(300)
+            print("[DashboardService] Conversation response (\(data.count) bytes): \(preview)...")
+        }
+
+        let decoder = JSONDecoder()
+        let result = try decoder.decode(ConversationResponse.self, from: data)
+        print("[DashboardService] Decoded \(result.turns.count) turns for \(agentId)")
+        return result.turns
     }
 
     // MARK: - Discovery (scan local network for API server)

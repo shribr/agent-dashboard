@@ -809,6 +809,36 @@ class CopilotChatSessionProvider extends DataProvider {
     return results;
   }
 
+  /**
+   * Build a concise task summary from the first few user messages.
+   * If the first message is too short/vague, incorporate subsequent messages.
+   */
+  private summarizeConversation(userMessages: string[], title?: string): string {
+    if (userMessages.length === 0) return title || '';
+
+    const first = userMessages[0].trim();
+
+    // If the first message is descriptive enough (>30 chars), use it directly
+    if (first.length > 30) {
+      return first.substring(0, 200);
+    }
+
+    // First message is short/vague — combine the first few for more context
+    const combined: string[] = [first];
+    let totalLen = first.length;
+    for (let i = 1; i < userMessages.length && i < 3; i++) {
+      const msg = userMessages[i].trim();
+      if (msg.length > 0 && totalLen + msg.length < 200) {
+        combined.push(msg);
+        totalLen += msg.length;
+      }
+      // Stop once we have enough context
+      if (totalLen > 80) break;
+    }
+
+    return combined.join(' → ').substring(0, 200);
+  }
+
   private parseSessionData(data: any, filePath: string, mtime: number): void {
     const sessionId = path.basename(filePath, '.json');
 
@@ -833,6 +863,8 @@ class CopilotChatSessionProvider extends DataProvider {
     const subagents: { id: string; name: string; task: string; actions: AgentAction[]; status: string }[] = [];
     let currentSubagent: typeof subagents[0] | null = null;
     let lastUserMessage = '';
+    let firstUserMessage = '';
+    const userMessages: string[] = [];
     const conversationSnippets: string[] = [];
 
     for (const req of requests) {
@@ -845,6 +877,12 @@ class CopilotChatSessionProvider extends DataProvider {
             || req.text || req.query || req.input || '');
         if (typeof prompt === 'string' && prompt.length > 0) {
           lastUserMessage = prompt.substring(0, 300);
+          if (!firstUserMessage) {
+            firstUserMessage = prompt.substring(0, 300);
+          }
+          if (userMessages.length < 5) {
+            userMessages.push(prompt.substring(0, 300));
+          }
           if (conversationSnippets.length < 10) {
             conversationSnippets.push('👤 ' + prompt.substring(0, 150));
           }
@@ -1011,14 +1049,20 @@ class CopilotChatSessionProvider extends DataProvider {
     // Store file path mapping for on-demand conversation loading
     this._agentFilePaths.set(agentId, filePath);
 
+    // Normalize name: strip GUID suffixes from titles like "Copilot Chat 832ec648"
+    let sessionName = data.title || 'Copilot Chat';
+    if (/^Copilot Chat\b/i.test(sessionName)) {
+      sessionName = 'Copilot Chat';
+    }
+
     this._agents.push({
       id: agentId,
-      name: data.title || `Copilot Chat ${sessionId.substring(0, 8)}`,
+      name: sessionName,
       type: 'copilot',
       typeLabel: subagents.length > 0 ? 'Agent Swarm' : 'Copilot Chat',
       model: data.model || '—',
       status: isActive ? 'running' : 'done',
-      task: lastUserMessage || data.title || 'Chat session',
+      task: this.summarizeConversation(userMessages, data.title) || 'Chat session',
       tokens: data.tokenCount || data.totalTokens || 0,
       startTime: data.createdAt ? new Date(data.createdAt).getTime() : mtime,
       elapsed: '—',
@@ -3017,7 +3061,12 @@ class DashboardProvider {
         estimatedCost: (totalTokens / 1000000) * 6,
         avgDuration: '—'
       },
-      dataSourceHealth: this.providers.map(p => p.status),
+      dataSourceHealth: this.providers.map(p => {
+        const s = p.status;
+        // Recalculate agent count post-enrichment (enrichment may merge/delete agents)
+        s.agentCount = agents.filter(a => a.sourceProvider === s.id).length;
+        return s;
+      }),
       primarySource
     } as any;
 
@@ -3922,8 +3971,10 @@ function getWebviewContent(webview: vscode.Webview): string {
     // Remove GUID suffixes like "Copilot Chat 832ec648" or "Claude Code abc123..."
     // Handles trailing whitespace and various separators (space, underscore, dash)
     var s = String(name || '').trim();
-    // Match separator + hex GUID (6+ chars) at end, with optional trailing dots/whitespace
-    s = s.replace(/[\s_-]+[a-fA-F0-9]{6,}\.{0,3}\s*$/, '');
+    // Match space + hex GUID (6+ chars) at end, with optional trailing dots/whitespace
+    s = s.replace(/\s+[a-fA-F0-9]{6,}\.{0,3}\s*$/, '');
+    // Also try with underscore/dash separators
+    s = s.replace(/[_-]+[a-fA-F0-9]{6,}\.{0,3}\s*$/, '');
     return s.trim();
   }
 
@@ -3945,106 +3996,6 @@ function getWebviewContent(webview: vscode.Webview): string {
     } else {
       return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + timeStr;
     }
-  }
-
-  function generateConversationSummary(convo, task) {
-    // Generate a human-readable summary from conversation preview entries
-    // convo entries are prefixed with emojis: 👤 (user), 🤖 (assistant), 🔧 (tool), ⏳ (thinking)
-    var userMsgs = [];
-    var assistantMsgs = [];
-    var toolMentions = [];
-    
-    for (var i = 0; i < convo.length; i++) {
-      var line = convo[i];
-      if (line.indexOf('\uD83D\uDC64') === 0) { // 👤 user
-        userMsgs.push(line.substring(2).trim());
-      } else if (line.indexOf('\uD83E\uDD16') === 0) { // 🤖 assistant
-        assistantMsgs.push(line.substring(2).trim());
-      } else if (line.indexOf('\uD83D\uDD27') === 0) { // 🔧 tool
-        var toolName = line.substring(2).trim().split(':')[0];
-        if (toolMentions.indexOf(toolName) === -1) toolMentions.push(toolName);
-      }
-    }
-    
-    var parts = [];
-    
-    // Describe the conversation scope
-    var msgCount = userMsgs.length + assistantMsgs.length;
-    if (msgCount > 0) {
-      parts.push('This conversation had ' + userMsgs.length + ' user message' + (userMsgs.length !== 1 ? 's' : '') + ' and ' + assistantMsgs.length + ' AI response' + (assistantMsgs.length !== 1 ? 's' : '') + '.');
-    }
-    
-    // Extract the main topic from the first user message or task
-    var topic = '';
-    if (userMsgs.length > 0) {
-      topic = userMsgs[0];
-      // Truncate if too long
-      if (topic.length > 100) topic = topic.substring(0, 100) + '...';
-      parts.push('Started with: "' + escHtml(topic) + '"');
-    } else if (task && task.length > 0 && task !== '—') {
-      topic = task;
-      if (topic.length > 100) topic = topic.substring(0, 100) + '...';
-      parts.push('Topic: ' + escHtml(topic));
-    }
-    
-    // Mention tools used
-    if (toolMentions.length > 0) {
-      var toolStr = toolMentions.slice(0, 3).join(', ');
-      if (toolMentions.length > 3) toolStr += ' +' + (toolMentions.length - 3) + ' more';
-      parts.push('Tools used: ' + escHtml(toolStr));
-    }
-    
-    return parts.length > 0 ? parts.join(' ') : 'Conversation data available.';
-  }
-
-  function cleanTaskText(task) {
-    // Remove technical details from task text
-    if (!task || task === '—') return task;
-    var text = String(task);
-    // Remove patterns like "(Id = GUID, accessMode = 0)" or "user(Id = ...)"
-    text = text.replace(/\(?[Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)?/g, '');
-    // Remove full GUID patterns
-    text = text.replace(/[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}/g, '');
-    // Remove "Additional Details: ..."
-    text = text.replace(/Additional Details:.*$/i, '');
-    // Remove "IsDisabled=True" etc
-    text = text.replace(/Is\w+=\w+,?\s*/g, '');
-    // Clean up double spaces and trim
-    text = text.replace(/\s{2,}/g, ' ').trim();
-    // Remove trailing "..." if we now have a short clean string
-    if (text.endsWith('...') && text.length < 50) text = text.replace(/\.+$/, '');
-    return text || '—';
-  }
-
-  function getAgentCardSummary(agent) {
-    // Generate a clean summary for the agent card
-    // Prefer conversation preview over raw task text
-    var convo = agent.conversationPreview || [];
-    
-    // If we have conversation preview, extract the first user message
-    for (var i = 0; i < convo.length; i++) {
-      var line = convo[i];
-      if (line.indexOf('\uD83D\uDC64') === 0) { // 👤 user message
-        var msg = line.substring(2).trim();
-        // Clean up GUID patterns from user messages too
-        msg = cleanTaskText(msg);
-        if (msg && msg !== '—' && msg.length > 5) {
-          // Truncate long messages
-          if (msg.length > 80) msg = msg.substring(0, 80) + '...';
-          return escHtml(msg);
-        }
-      }
-    }
-    
-    // Fall back to cleaned task text
-    var cleanedTask = cleanTaskText(agent.task);
-    if (cleanedTask && cleanedTask !== '—' && cleanedTask.length > 5) {
-      if (cleanedTask.length > 80) cleanedTask = cleanedTask.substring(0, 80) + '...';
-      return escHtml(cleanedTask);
-    }
-    
-    // Final fallback
-    return 'Chat session';
   }
 
   function formatMsgText(text) {
@@ -4213,7 +4164,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     // Status & meta
     html += '<div class="detail-section">';
     html += '<div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:center;">Status <span class="sb sb-'+agent.status+'">'+agent.status.charAt(0).toUpperCase()+agent.status.slice(1)+'</span></div>';
-    html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+escHtml(cleanTaskText(agent.task))+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+escHtml(agent.task || '-')+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+agent.model+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+agent.sourceProvider+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">'+(agent.startTime ? formatConversationDate(agent.startTime) : agent.elapsed)+'</span></div>';
@@ -4300,13 +4251,14 @@ function getWebviewContent(webview: vscode.Webview): string {
     var convo = agent.conversationPreview || [];
     if (convo.length > 0 || agent.hasConversationHistory) {
       html += '<div class="detail-section">';
-      html += '<div class="detail-section-title">Conversation Summary</div>';
+      html += '<div class="detail-section-title">Conversation</div>';
       if (agent.startTime) {
         html += '<div style="font-size:9px;color:var(--text-dim);margin-bottom:6px;">'+formatConversationDate(agent.startTime)+'</div>';
       }
-      // Generate a summary from the conversation preview
-      var summary = generateConversationSummary(convo, agent.task);
-      html += '<div style="font-size:11px;line-height:1.5;color:var(--text);padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px;">'+summary+'</div>';
+      // Show the task/topic as summary
+      var summaryText = agent.task && agent.task !== '\u2014' ? agent.task : 'Chat session available';
+      if (summaryText.length > 120) summaryText = summaryText.substring(0, 120) + '...';
+      html += '<div style="font-size:11px;line-height:1.5;color:var(--text);padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:10px;">'+escHtml(summaryText)+'</div>';
       // View full chat history link
       if (agent.hasConversationHistory) {
         html += '<a class="view-chat-link" data-agent-id="'+agent.id+'" data-agent-name="'+escHtml(stripGuid(agent.name))+'" data-start-time="'+(agent.startTime||'')+'" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--accent);cursor:pointer;text-decoration:none;">&#128172; View full chat history &rarr;</a>';
@@ -4432,7 +4384,7 @@ function getWebviewContent(webview: vscode.Webview): string {
         '<div class="agent-top">'+
           '<div class="agent-info">'+
             '<div class="agent-name">'+stripGuid(a.name)+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
-            '<div class="agent-task">'+getAgentCardSummary(a)+'</div>'+
+            '<div class="agent-task">'+escHtml(a.task || 'Chat session')+'</div>'+
           '</div>'+
           '<div class="agent-right">'+
             '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
