@@ -3171,6 +3171,8 @@ class DashboardProvider {
       res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+      this.outputChannel.appendLine(`[api] ${req.method} ${req.url}`);
+
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
         res.end();
@@ -3190,7 +3192,8 @@ class DashboardProvider {
       }
 
       // Conversation history endpoint: /api/agents/{agentId}/conversation
-      const convoMatch = req.url?.match(/^\/api\/agents\/([^/]+)\/conversation$/);
+      const urlPath = (req.url || '').split('?')[0]; // strip query string
+      const convoMatch = urlPath.match(/^\/api\/agents\/([^/]+)\/conversation\/?$/);
       if (convoMatch && req.method === 'GET') {
         const agentId = decodeURIComponent(convoMatch[1]);
         this.outputChannel.appendLine(`[api] Conversation request for ${agentId}`);
@@ -3207,8 +3210,9 @@ class DashboardProvider {
         return;
       }
 
+      this.outputChannel.appendLine(`[api] 404 Not found: ${req.method} ${req.url}`);
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found', endpoints: ['/api/state', '/api/health', '/api/agents/{id}/conversation'] }));
+      res.end(JSON.stringify({ error: 'Not found', requestedUrl: req.url, endpoints: ['/api/state', '/api/health', '/api/agents/{id}/conversation'] }));
     });
 
     this.apiServer.listen(port, '0.0.0.0', () => {

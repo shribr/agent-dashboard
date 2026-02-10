@@ -27,9 +27,10 @@ struct SettingsView: View {
                         HStack {
                             Text("Port")
                             Spacer()
-                            TextField("19850", value: $service.localPort, format: .number)
+                            TextField("19850", value: $service.localPort, formatter: NumberFormatter())
                                 .multilineTextAlignment(.trailing)
                                 .foregroundStyle(.secondary)
+                                .keyboardType(.numberPad)
                                 .frame(width: 80)
                         }
                     } else {
