@@ -17,7 +17,6 @@ struct AgentListView: View {
     @EnvironmentObject var service: DashboardService
     @State private var filter: AgentStatus? = nil
     @State private var providerFilter: String? = nil
-    @State private var expandedAgent: String? = nil
     @State private var presentedSheet: AgentSheetType? = nil
     @State private var searchText: String = ""
 
@@ -195,12 +194,6 @@ struct AgentListView: View {
                         ForEach(filteredAgents) { agent in
                             AgentCard(
                                 agent: agent,
-                                isExpanded: expandedAgent == agent.id,
-                                onToggleExpand: {
-                                    withAnimation(.spring(response: 0.3)) {
-                                        expandedAgent = expandedAgent == agent.id ? nil : agent.id
-                                    }
-                                },
                                 onShowDetails: {
                                     presentedSheet = .detail(agent)
                                 },
@@ -300,8 +293,6 @@ struct ProviderChip: View {
 
 struct AgentCard: View {
     let agent: AgentSession
-    let isExpanded: Bool
-    let onToggleExpand: () -> Void
     let onShowDetails: () -> Void
     var onShowConversation: (() -> Void)? = nil
     var onFilterProvider: ((String) -> Void)? = nil
@@ -421,7 +412,7 @@ struct AgentCard: View {
             Text(agent.task)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .lineLimit(isExpanded ? nil : 2)
+                .lineLimit(2)
 
             // Task summary (compact — shows X/Y tasks done)
             if let tasks = agent.tasks, !tasks.isEmpty {
@@ -458,148 +449,6 @@ struct AgentCard: View {
                             Text(agent.elapsed)
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-            }
-
-            // Expand/collapse button
-            Button(action: onToggleExpand) {
-                HStack(spacing: 4) {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
-                    if let tasks = agent.tasks, !tasks.isEmpty {
-                        let completed = tasks.filter { $0.status == .completed }.count
-                        Text("\(completed)/\(tasks.count) tasks")
-                            .font(.caption2)
-                    } else {
-                        Text("More info")
-                            .font(.caption2)
-                    }
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color(.tertiarySystemFill))
-                .clipShape(Capsule())
-            }
-
-            // Expanded inline details
-            if isExpanded {
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    DetailRow(label: "Model", value: agent.model)
-                    DetailRow(label: "Provider", value: agent.sourceProvider)
-                    DetailRow(label: "Elapsed", value: agent.elapsed)
-                    DetailRow(label: "Tokens", value: formatTokens(agent.tokens))
-
-                    if let pid = agent.pid {
-                        DetailRow(label: "PID", value: "\(pid)")
-                    }
-
-                    if let host = agent.remoteHost {
-                        DetailRow(label: "Host", value: host)
-                    }
-
-                    if let tool = agent.activeTool {
-                        DetailRow(label: "Active Tool", value: tool)
-                    }
-
-                    // Task list (expanded)
-                    if let tasks = agent.tasks, !tasks.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            let completed = tasks.filter { $0.status == .completed }.count
-                            Text("Tasks (\(completed)/\(tasks.count) done)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            ForEach(tasks) { task in
-                                HStack(alignment: .top, spacing: 8) {
-                                    Image(systemName: task.status.iconName)
-                                        .font(.caption)
-                                        .foregroundStyle(task.status.color)
-                                        .frame(width: 16)
-
-                                    Text(task.activeForm ?? task.content)
-                                        .font(.caption)
-                                        .foregroundStyle(task.status == .completed ? .secondary : .primary)
-                                        .strikethrough(task.status == .completed)
-                                        .fontWeight(task.status == .in_progress ? .semibold : .regular)
-                                }
-                            }
-                        }
-                    }
-
-                    if !agent.tools.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Tools")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            FlowLayout(spacing: 4) {
-                                ForEach(Array(agent.tools.enumerated()), id: \.offset) { _, tool in
-                                    Text(tool)
-                                        .font(.caption2)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Color(.tertiarySystemFill))
-                                        .clipShape(Capsule())
-                                }
-                            }
-                        }
-                    }
-
-                    if !agent.files.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Files (\(agent.files.count))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            ForEach(Array(agent.files.prefix(5).enumerated()), id: \.offset) { _, file in
-                                HStack(spacing: 4) {
-                                    Image(systemName: "doc.text")
-                                        .font(.caption2)
-                                    Text(file)
-                                        .font(.caption2)
-                                        .lineLimit(1)
-                                }
-                                .foregroundStyle(.secondary)
-                            }
-                            if agent.files.count > 5 {
-                                Text("+ \(agent.files.count - 5) more")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-
-                    // Compact recent activity preview
-                    if let actions = agent.recentActions, !actions.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Recent Activity")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            ForEach(actions.suffix(5).reversed()) { action in
-                                HStack(spacing: 6) {
-                                    Image(systemName: action.iconName)
-                                        .font(.caption2)
-                                        .foregroundStyle(action.iconColor)
-                                        .frame(width: 14)
-                                    Text(action.tool)
-                                        .font(.caption2)
-                                        .fontWeight(.semibold)
-                                        .foregroundStyle(.secondary)
-                                    Text(action.detail)
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
-                            }
-                            if actions.count > 5 {
-                                Text("+ \(actions.count - 5) more — tap Details for full timeline")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .italic()
-                            }
                         }
                     }
                 }

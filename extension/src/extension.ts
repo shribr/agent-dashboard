@@ -3489,9 +3489,8 @@ function getWebviewContent(webview: vscode.Webview): string {
   .section-header { font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim); margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; }
   .agent-list { display:flex; flex-direction:column; gap:8px; }
 
-  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; }
+  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; overflow:hidden; }
   .agent-card:hover { border-color:rgba(108,92,231,0.4); }
-  .agent-card.expanded { border-color:var(--accent); }
   .agent-card.st-running { border-left:3px solid var(--green); }
   .agent-card.st-thinking { border-left:3px solid var(--orange); }
   .agent-card.st-paused { border-left:3px solid var(--yellow); }
@@ -3503,12 +3502,6 @@ function getWebviewContent(webview: vscode.Webview): string {
   .agent-name { font-weight:600; font-size:13px; margin-bottom:2px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
   .agent-task { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .agent-right { display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0; }
-  .agent-toggle-btn { display:flex; align-items:center; gap:3px; padding:2px 7px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:9px; cursor:pointer; font-family:inherit; transition:all 0.15s; }
-  .agent-toggle-btn:hover { border-color:var(--accent); color:var(--text); }
-  .agent-toggle-btn .arrow { font-size:10px; transition:transform 0.2s; }
-  .agent-card.expanded .agent-toggle-btn .arrow { transform:rotate(90deg); }
-  .agent-details { display:none; margin-top:10px; border-top:1px solid var(--border); padding-top:10px; }
-  .agent-card.expanded .agent-details { display:block; }
 
   /* Slide-out detail panel */
   .detail-overlay { display:none; position:fixed; top:0; right:0; bottom:0; left:0; z-index:99; }
@@ -3811,13 +3804,6 @@ function getWebviewContent(webview: vscode.Webview): string {
 
   // Expand/collapse inline details
   document.getElementById('agents').addEventListener('click', function(e) {
-    // Toggle expand on the expand button only
-    var expandBtn = e.target.closest('.agent-toggle-btn');
-    if (expandBtn) {
-      var card = expandBtn.closest('.agent-card');
-      if (card) card.classList.toggle('expanded');
-      return;
-    }
     // Open conversation history modal (skip if disabled)
     var convoBtn = e.target.closest('.convo-btn');
     if (convoBtn) {
@@ -4256,62 +4242,6 @@ function getWebviewContent(webview: vscode.Webview): string {
       var loc = a.remoteHost || (a.location.charAt(0).toUpperCase()+a.location.slice(1));
       var tasks = a.tasks || [];
       var hasTasks = tasks.length > 0;
-      var taskIcons = { completed:'&#10003;', in_progress:'&#9654;', pending:'&#9675;' };
-
-      var detailsHtml = '<div class="agent-details">';
-      detailsHtml += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+a.model+'</span></div>';
-      detailsHtml += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+a.sourceProvider+'</span></div>';
-      detailsHtml += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
-      if (a.pid) detailsHtml += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+a.pid+'</span></div>';
-      if (a.activeTool) detailsHtml += '<div class="detail-row"><span class="detail-label">Active</span><span class="detail-value">'+a.activeTool+'</span></div>';
-
-      if (hasTasks) {
-        var completed = tasks.filter(function(t) { return t.status==='completed'; }).length;
-        detailsHtml += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tasks ('+completed+'/'+tasks.length+' done)</div>';
-        detailsHtml += '<ul class="task-list">';
-        for (var ti = 0; ti < tasks.length; ti++) {
-          var t = tasks[ti];
-          var icon = taskIcons[t.status] || '&#9675;';
-          detailsHtml += '<li class="task-item"><span class="task-icon '+t.status+'">'+icon+'</span><span class="task-text '+t.status+'">'+(t.activeForm || t.content)+'</span></li>';
-        }
-        detailsHtml += '</ul>';
-      }
-
-      if (a.files && a.files.length > 0) {
-        detailsHtml += '<div class="file-list"><div style="font-size:10px;color:var(--text-dim);margin:6px 0 4px;">Files ('+a.files.length+')</div>';
-        var showFiles = a.files.slice(0,8);
-        for (var fi = 0; fi < showFiles.length; fi++) {
-          detailsHtml += '<div class="file-item">&#128196; '+showFiles[fi]+'</div>';
-        }
-        if (a.files.length > 8) detailsHtml += '<div class="file-item" style="opacity:0.5">+ '+(a.files.length-8)+' more</div>';
-        detailsHtml += '</div>';
-      }
-
-      if (a.tools && a.tools.length > 0) {
-        detailsHtml += '<div style="margin-top:6px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Tools</div>';
-        detailsHtml += '<div style="display:flex;gap:4px;flex-wrap:wrap;">';
-        for (var tl = 0; tl < a.tools.length; tl++) {
-          detailsHtml += '<span style="font-size:9px;padding:2px 6px;background:var(--surface2);border-radius:3px;color:var(--text-dim);">'+a.tools[tl]+'</span>';
-        }
-        detailsHtml += '</div>';
-      }
-
-      // Compact recent actions in inline view
-      var inlineActions = a.recentActions || [];
-      if (inlineActions.length > 0) {
-        var recent5 = inlineActions.slice(-5).reverse();
-        detailsHtml += '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);margin-bottom:4px;">Recent Activity</div>';
-        var tIcons = { Read:'&#128196;', Edit:'&#9998;', Write:'&#128221;', Bash:'&#9881;', Search:'&#128269;', Subagent:'&#9654;' };
-        for (var ra = 0; ra < recent5.length; ra++) {
-          var ract = recent5[ra];
-          detailsHtml += '<div style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:9px;"><span>'+(tIcons[ract.tool]||'&#9679;')+'</span><span style="font-weight:600;opacity:0.7;">'+ract.tool+'</span><span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+ract.detail+'</span></div>';
-        }
-        if (inlineActions.length > 5) {
-          detailsHtml += '<div style="font-size:8px;color:var(--text-dim);opacity:0.6;padding-top:2px;">+ '+(inlineActions.length - 5)+' more — open Details for full timeline</div>';
-        }
-      }
-
-      detailsHtml += '</div>';
 
       return '<div class="agent-card st-'+a.status+'">'+
         '<div class="agent-top">'+
@@ -4338,8 +4268,6 @@ function getWebviewContent(webview: vscode.Webview): string {
             ? '<div class="activity-indicator"></div><div class="progress-label"><span>'+a.progressLabel+'</span><span>'+a.elapsed+'</span></div>'
             : ''
         )+
-        '<div style="margin-top:6px;"><button class="agent-toggle-btn"><span class="arrow">&#9662;</span> '+(hasTasks ? tasks.filter(function(t){return t.status==="completed";}).length+'/'+tasks.length+' tasks' : 'More info')+'</button></div>'+
-        detailsHtml+
       '</div>';
     }).join('');
   }
