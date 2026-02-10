@@ -1261,12 +1261,44 @@ class CopilotChatSessionProvider extends DataProvider {
         }
 
         // ── Assistant response ──
-        const responseParts = Array.isArray(req.response) ? req.response : [];
+        let responseParts: any[] = [];
         let assistantText = '';
         const toolCalls: ConversationTurn['toolCalls'] = [];
 
+        // Handle various response formats
+        if (Array.isArray(req.response)) {
+          responseParts = req.response;
+        } else if (req.response && typeof req.response === 'object') {
+          // Response might be an object with value/text/message
+          const resp = req.response;
+          if (typeof resp.value === 'string') {
+            assistantText = resp.value;
+          } else if (Array.isArray(resp.value)) {
+            responseParts = resp.value;
+          }
+          if (resp.text) assistantText += resp.text;
+          if (resp.message && typeof resp.message === 'string') assistantText += resp.message;
+          if (resp.content && typeof resp.content === 'string') assistantText += resp.content;
+          // Check for parts array
+          if (Array.isArray(resp.parts)) responseParts = resp.parts;
+          if (Array.isArray(resp.content)) responseParts = resp.content;
+        } else if (typeof req.response === 'string') {
+          assistantText = req.response;
+        }
+
         for (const part of responseParts) {
-          if (!part || !part.type) continue;
+          if (!part) continue;
+
+          // Handle parts without type (direct text)
+          if (typeof part === 'string') {
+            assistantText += part;
+            continue;
+          }
+          if (part.value && typeof part.value === 'string' && !part.type) {
+            assistantText += part.value;
+            continue;
+          }
+          if (!part.type) continue;
 
           if (part.type === 'markdown' && part.markdown?.value) {
             assistantText += part.markdown.value;
@@ -1299,12 +1331,9 @@ class CopilotChatSessionProvider extends DataProvider {
           }
         }
 
-        // Handle older object-style responses
+        // Extract tool calls from object-style blocks (for older formats)
         if (!Array.isArray(req.response) && req.response) {
           const resp = req.response;
-          const text = typeof resp.value === 'string' ? resp.value : (resp.text || resp.message || '');
-          if (text) assistantText += text;
-
           const blocks = resp.value || resp.parts || resp.content || [];
           if (Array.isArray(blocks)) {
             for (const block of blocks) {
@@ -3455,8 +3484,8 @@ function getWebviewContent(webview: vscode.Webview): string {
     --yellow: #fdcb6e; --yellow-glow: rgba(253,203,110,0.15);
   }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family: var(--vscode-font-family, system-ui, sans-serif); background:var(--bg); color:var(--text); min-height:100vh; font-size:13px; }
-  .dashboard { max-width:1400px; margin:0 auto; padding:20px; }
+  body { font-family: var(--vscode-font-family, system-ui, sans-serif); background:var(--bg); color:var(--text); min-height:100vh; font-size:13px; overflow-x:hidden; }
+  .dashboard { max-width:1400px; margin:0 auto; padding:20px; overflow:hidden; }
 
   .header { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
   .header-left { display:flex; align-items:center; gap:12px; }
@@ -3471,7 +3500,10 @@ function getWebviewContent(webview: vscode.Webview): string {
   .btn:hover { border-color:var(--accent); color:var(--text); }
   .btn-refreshing { opacity:0.6; pointer-events:none; }
   @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
-  .btn-refreshing::first-letter { display:inline-block; animation:spin 0.8s linear infinite; }
+  .btn-refreshing .refresh-icon { display:inline-block; animation:spin 0.8s linear infinite; }
+  .refresh-toast { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:var(--surface); border:1px solid var(--accent); border-radius:8px; padding:12px 20px; font-size:11px; color:var(--accent); z-index:999; display:none; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
+  .refresh-toast.show { display:flex; align-items:center; gap:8px; animation:fadeInOut 1.5s ease-in-out forwards; }
+  @keyframes fadeInOut { 0%{opacity:0;transform:translate(-50%,-50%) scale(0.9)} 15%{opacity:1;transform:translate(-50%,-50%) scale(1)} 85%{opacity:1} 100%{opacity:0} }
 
   .stats-row { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:18px; }
   .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:9px; padding:12px; position:relative; overflow:hidden; }
@@ -3485,11 +3517,12 @@ function getWebviewContent(webview: vscode.Webview): string {
   .stat-value { font-size:22px; font-weight:700; letter-spacing:-0.5px; }
   .stat-sub { font-size:9px; color:var(--text-dim); margin-top:2px; }
 
-  .main-grid { display:grid; grid-template-columns:1fr 280px; gap:14px; }
+  .main-grid { display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:14px; }
+  .agents-column { width:100%; min-width:0; overflow:hidden; }
   .section-header { font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim); margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; }
-  .agent-list { display:flex; flex-direction:column; gap:8px; }
+  .agent-list { display:flex; flex-direction:column; gap:8px; width:100%; min-width:0; }
 
-  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; overflow:hidden; }
+  .agent-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; transition:border-color 0.15s; overflow:hidden; width:100%; box-sizing:border-box; }
   .agent-card:hover { border-color:rgba(108,92,231,0.4); }
   .agent-card.st-running { border-left:3px solid var(--green); }
   .agent-card.st-thinking { border-left:3px solid var(--orange); }
@@ -3498,8 +3531,8 @@ function getWebviewContent(webview: vscode.Webview): string {
   .agent-card.st-error { border-left:3px solid var(--red); }
   .agent-card.st-queued { border-left:3px solid var(--text-dim); }
   .agent-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:8px; }
-  .agent-info { flex:1; min-width:0; }
-  .agent-name { font-weight:600; font-size:13px; margin-bottom:2px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .agent-info { flex:1; min-width:0; overflow:hidden; }
+  .agent-name { font-weight:600; font-size:13px; margin-bottom:2px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; overflow:hidden; max-width:100%; word-break:break-word; }
   .agent-task { font-size:11px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .agent-right { display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0; }
 
@@ -3610,10 +3643,10 @@ function getWebviewContent(webview: vscode.Webview): string {
   .empty-state .hint { font-size:10px; opacity:0.6; margin-top:4px; }
 
   /* Search & Filter */
-  .search-filter-bar { display:flex; gap:8px; margin-bottom:6px; align-items:center; flex-wrap:wrap; }
-  .search-input { flex:1; min-width:140px; padding:6px 10px 6px 30px; border-radius:7px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:11px; font-family:inherit; outline:none; transition:border-color 0.15s; }
+  .search-filter-bar { display:flex; gap:8px; margin-bottom:6px; align-items:center; flex-wrap:wrap; width:100%; overflow:hidden; }
+  .search-input { flex:1; min-width:140px; padding:6px 10px 6px 30px; border-radius:7px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:11px; font-family:inherit; outline:none; transition:border-color 0.15s; box-sizing:border-box; }
   .search-input:focus { border-color:var(--accent); }
-  .search-wrap { position:relative; flex:1; min-width:140px; }
+  .search-wrap { position:relative; flex:1; min-width:140px; max-width:100%; overflow:hidden; }
   .search-icon { position:absolute; left:9px; top:50%; transform:translateY(-50%); font-size:12px; color:var(--text-dim); pointer-events:none; }
   .filter-chips { display:flex; gap:4px; flex-wrap:wrap; }
   .filter-chip { padding:3px 9px; border-radius:12px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:9px; cursor:pointer; font-weight:500; transition:all 0.15s; font-family:inherit; white-space:nowrap; }
@@ -3621,7 +3654,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   .filter-chip.active { background:var(--accent-glow); border-color:var(--accent); color:var(--accent); font-weight:600; }
   .filter-chip .chip-count { display:inline-block; margin-left:3px; padding:0 5px; background:rgba(255,255,255,0.08); border-radius:8px; font-size:8px; }
   .filter-chip.active .chip-count { background:rgba(108,92,231,0.25); }
-  .provider-filter-bar { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; align-items:center; }
+  .provider-filter-bar { display:flex; gap:4px; margin-bottom:10px; flex-wrap:wrap; align-items:center; width:100%; overflow:hidden; }
   .provider-filter-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; margin-right:2px; }
   .provider-chip { padding:2px 8px; border-radius:10px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); font-size:8px; cursor:pointer; font-weight:500; transition:all 0.15s; font-family:inherit; white-space:nowrap; }
   .provider-chip:hover { border-color:var(--accent); color:var(--text); }
@@ -3658,9 +3691,10 @@ function getWebviewContent(webview: vscode.Webview): string {
   .msg-bubble { max-width:75%; border-radius:10px; padding:10px 14px; border:1px solid var(--border); }
   .msg.msg-assistant .msg-bubble { background:var(--surface2); border-top-left-radius:2px; }
   .msg.msg-user .msg-bubble { background:rgba(0,184,148,0.08); border-color:rgba(0,184,148,0.25); border-top-right-radius:2px; }
-  .msg-role { font-size:9px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
+  .msg-role { font-size:9px; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; display:flex; align-items:center; gap:8px; }
   .msg.msg-assistant .msg-role { color:var(--accent); }
   .msg.msg-user .msg-role { color:var(--green); }
+  .msg-time { font-size:8px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--text-dim); }
   .msg-text { font-size:12px; line-height:1.55; color:var(--text); white-space:pre-wrap; word-break:break-word; }
   .msg-text pre { background:var(--bg); border:1px solid var(--border); border-left:3px solid var(--accent); padding:8px 10px; margin:8px 0; border-radius:4px; overflow-x:auto; font-size:11px; line-height:1.4; font-family:'Cascadia Code','Fira Code',Consolas,monospace; white-space:pre-wrap; }
   .msg-text code { background:var(--surface2); padding:1px 4px; border-radius:3px; font-family:'Cascadia Code','Fira Code',Consolas,monospace; font-size:0.9em; }
@@ -3696,18 +3730,18 @@ function getWebviewContent(webview: vscode.Webview): string {
         <option value="claude-code">Claude Code</option>
         <option value="both">Both</option>
       </select>
-      <button class="btn" id="btn-refresh">&#8635; Refresh</button>
+      <button class="btn" id="btn-refresh"><span class="refresh-icon">&#8635;</span> Refresh</button>
       <button class="btn" id="btn-log">&#128196; Log</button>
     </div>
   </div>
   <div class="stats-row" id="stats"></div>
   <div class="main-grid">
-    <div>
+    <div class="agents-column">
       <div class="section-header">Agent Sessions <span id="agent-count"></span></div>
       <div class="search-filter-bar">
         <div class="search-wrap">
           <span class="search-icon">&#128269;</span>
-          <input class="search-input" id="search-input" type="text" placeholder="Search agents by name, task, model...">
+          <input class="search-input" id="search-input" type="text" placeholder="Search...">
         </div>
         <div class="filter-chips" id="filter-chips"></div>
       </div>
@@ -3726,6 +3760,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     </div>
   </div>
 </div>
+<div id="refresh-toast" class="refresh-toast"><span class="refresh-icon" style="animation:spin 0.8s linear infinite;">&#8635;</span> Refreshing...</div>
 <div class="detail-overlay" id="detail-overlay"></div>
 <div class="detail-panel" id="detail-panel">
   <div class="detail-panel-header">
@@ -3776,10 +3811,12 @@ function getWebviewContent(webview: vscode.Webview): string {
     var btn = this;
     btn.disabled = true;
     btn.classList.add('btn-refreshing');
-    btn.innerHTML = '&#8635; Refreshing...';
+    // Show refresh toast instead of changing button text
+    var toast = document.getElementById('refresh-toast');
+    if (toast) { toast.classList.add('show'); setTimeout(function() { toast.classList.remove('show'); }, 1500); }
     send('refresh');
     // Re-enable after data arrives or timeout
-    setTimeout(function() { btn.disabled = false; btn.classList.remove('btn-refreshing'); btn.innerHTML = '&#8635; Refresh'; }, 4000);
+    setTimeout(function() { btn.disabled = false; btn.classList.remove('btn-refreshing'); }, 4000);
   });
   document.getElementById('btn-log').addEventListener('click', function() { send('openLog'); });
   document.getElementById('source-select').addEventListener('change', function() { send('switchSource', { source: this.value }); });
@@ -3810,7 +3847,8 @@ function getWebviewContent(webview: vscode.Webview): string {
       if (convoBtn.classList.contains('convo-disabled')) return;
       var agentId = convoBtn.getAttribute('data-agent-id');
       var agentName = convoBtn.getAttribute('data-agent-name') || 'Conversation';
-      if (agentId) openConversation(agentId, agentName);
+      var startTime = convoBtn.getAttribute('data-start-time');
+      if (agentId) openConversation(agentId, agentName, startTime);
       return;
     }
     // Open slide-out panel on the panel toggle button
@@ -3869,6 +3907,31 @@ function getWebviewContent(webview: vscode.Webview): string {
     return String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  function stripGuid(name) {
+    // Remove GUID suffixes like "Copilot Chat 832ec648" or "Claude Code abc123..."
+    return String(name || '').replace(/\s+[a-fA-F0-9]{6,}\.{0,3}$/, '').trim();
+  }
+
+  function formatConversationDate(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var opts = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    return d.toLocaleDateString([], opts);
+  }
+
+  function formatTimestamp(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var now = new Date();
+    var sameDay = d.toDateString() === now.toDateString();
+    var timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (sameDay) {
+      return timeStr;
+    } else {
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + timeStr;
+    }
+  }
+
   function formatMsgText(text) {
     var html = escHtml(text);
     // Fenced code blocks: three-backtick blocks
@@ -3882,18 +3945,27 @@ function getWebviewContent(webview: vscode.Webview): string {
     return html;
   }
 
-  function openConversation(agentId, agentName) {
+  function openConversation(agentId, agentName, startTime) {
     convoAgentId = agentId;
     convoOpen = true;
     convoTurns = [];
     // Look up agent status for "awaiting input" detection
     convoAgentStatus = null;
+    var agentStartTime = startTime ? parseInt(startTime, 10) : null;
     if (currentState && currentState.agents) {
       for (var ai = 0; ai < currentState.agents.length; ai++) {
-        if (currentState.agents[ai].id === agentId) { convoAgentStatus = currentState.agents[ai].status; break; }
+        if (currentState.agents[ai].id === agentId) {
+          convoAgentStatus = currentState.agents[ai].status;
+          if (!agentStartTime) agentStartTime = currentState.agents[ai].startTime;
+          break;
+        }
       }
     }
-    document.getElementById('convo-title').textContent = agentName || 'Conversation';
+    var titleText = stripGuid(agentName) || 'Conversation';
+    if (agentStartTime) {
+      titleText += ' — ' + formatConversationDate(agentStartTime);
+    }
+    document.getElementById('convo-title').textContent = titleText;
     document.getElementById('convo-search').value = '';
     document.getElementById('convo-body').innerHTML = '<div class="convo-loading"><div class="convo-spinner"></div><div>Loading conversation...</div></div>';
     document.getElementById('convo-overlay').classList.add('open');
@@ -3937,11 +4009,12 @@ function getWebviewContent(webview: vscode.Webview): string {
       var roleClass = t.role === 'user' ? 'msg-user' : 'msg-assistant';
       var avatar = t.role === 'user' ? '&#128100;' : '&#129302;';
       var roleLabel = t.role === 'user' ? 'You' : 'Assistant';
+      var tsStr = t.timestamp ? formatTimestamp(t.timestamp) : '';
       var isAwaiting = (i === lastAssistantIdx);
       html += '<div class="msg ' + roleClass + (isAwaiting ? ' msg-awaiting' : '') + '">';
       html += '<div class="msg-avatar">' + avatar + '</div>';
       html += '<div class="msg-bubble' + (isAwaiting ? ' bubble-awaiting' : '') + '">';
-      html += '<div class="msg-role">' + roleLabel + '</div>';
+      html += '<div class="msg-role">' + roleLabel + (tsStr ? '<span class="msg-time">' + tsStr + '</span>' : '') + '</div>';
       html += '<div class="msg-text">' + formatMsgText(t.content) + '</div>';
 
       // "Awaiting input" banner
@@ -4018,7 +4091,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     if (!agent) return;
     activePanelAgentId = agentId;
 
-    document.getElementById('detail-panel-title').textContent = agent.name;
+    document.getElementById('detail-panel-title').textContent = stripGuid(agent.name);
     var body = document.getElementById('detail-panel-body');
     var html = '';
 
@@ -4029,7 +4102,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+agent.task+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+agent.model+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+agent.sourceProvider+'</span></div>';
-    html += '<div class="detail-row"><span class="detail-label">Elapsed</span><span class="detail-value">'+agent.elapsed+'</span></div>';
+    html += '<div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">'+(agent.startTime ? formatConversationDate(agent.startTime) : agent.elapsed)+'</span></div>';
     var loc = agent.remoteHost || (agent.location.charAt(0).toUpperCase()+agent.location.slice(1));
     html += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
     if (agent.pid) html += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+agent.pid+'</span></div>';
@@ -4114,6 +4187,9 @@ function getWebviewContent(webview: vscode.Webview): string {
     if (convo.length > 0) {
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Conversation Preview ('+convo.length+' entries)</div>';
+      if (agent.startTime) {
+        html += '<div style="font-size:9px;color:var(--text-dim);margin-bottom:6px;">From '+formatConversationDate(agent.startTime)+'</div>';
+      }
       html += '<div style="display:flex;flex-direction:column;gap:3px;">';
       for (var ci = 0; ci < convo.length; ci++) {
         var line = convo[ci];
@@ -4246,18 +4322,18 @@ function getWebviewContent(webview: vscode.Webview): string {
       return '<div class="agent-card st-'+a.status+'">'+
         '<div class="agent-top">'+
           '<div class="agent-info">'+
-            '<div class="agent-name">'+a.name+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
+            '<div class="agent-name">'+stripGuid(a.name)+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
             '<div class="agent-task">'+a.task+'</div>'+
           '</div>'+
           '<div class="agent-right">'+
             '<span class="sb sb-'+a.status+'">'+a.status.charAt(0).toUpperCase()+a.status.slice(1)+'</span>'+
-            ((a.type==='copilot'||a.type==='claude') ? '<button class="panel-toggle-btn convo-btn'+(a.hasConversationHistory?'':' convo-disabled')+'" data-agent-id="'+a.id+'" data-agent-name="'+escHtml(a.name)+'"'+(a.hasConversationHistory?'':' title="No saved conversation history yet"')+'>&#128172; Chat</button>' : '')+
+            ((a.type==='copilot'||a.type==='claude') ? '<button class="panel-toggle-btn convo-btn'+(a.hasConversationHistory?'':' convo-disabled')+'" data-agent-id="'+a.id+'" data-agent-name="'+escHtml(stripGuid(a.name))+'" data-start-time="'+(a.startTime||'')+'"'+(a.hasConversationHistory?'':' title="No saved conversation history yet"')+'>&#128172; Chat</button>' : '')+
             '<button class="panel-toggle-btn" data-agent-id="'+a.id+'"><span class="arrow">&#9656;</span> Details</button>'+
           '</div>'+
         '</div>'+
         '<div class="agent-meta">'+
           '<span>'+a.model+'</span>'+
-          '<span>'+a.elapsed+'</span>'+
+          '<span>'+(a.startTime ? formatConversationDate(a.startTime).split(' at ')[0] : a.elapsed)+'</span>'+
           (a.tokens?'<span>'+fmt(a.tokens)+' tokens</span>':'')+
           (hasTasks?'<span>'+tasks.filter(function(t) { return t.status==='completed'; }).length+'/'+tasks.length+' tasks</span>':'')+
           '<span style="opacity:0.5">via '+a.sourceProvider+'</span>'+
@@ -4326,7 +4402,7 @@ function getWebviewContent(webview: vscode.Webview): string {
     if (e.data && e.data.type === 'update') {
       // Reset refresh button when data arrives
       var rb = document.getElementById('btn-refresh');
-      if (rb) { rb.disabled = false; rb.classList.remove('btn-refreshing'); rb.innerHTML = '&#8635; Refresh'; }
+      if (rb) { rb.disabled = false; rb.classList.remove('btn-refreshing'); }
       try {
         render(e.data.state);
       } catch (err) {

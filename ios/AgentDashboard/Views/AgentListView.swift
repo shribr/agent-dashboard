@@ -307,6 +307,18 @@ struct AgentCard: View {
         return name
     }
 
+    /// Cleans task text by removing technical details like user IDs and access modes
+    private var cleanedTask: String {
+        var text = agent.task
+        // Remove patterns like "(id = GUID, accessMode = 0)" or "(Id = GUID..."
+        text = text.replacingOccurrences(of: #"\([Ii]d\s*=\s*[a-fA-F0-9\-]+,?\s*(accessMode\s*=\s*\d+)?\)"#, with: "", options: .regularExpression)
+        // Remove standalone GUIDs
+        text = text.replacingOccurrences(of: #"\b[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}\b"#, with: "", options: .regularExpression)
+        // Clean up double spaces
+        text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespaces)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Header row 1: Status icon, name, and status badge
@@ -408,8 +420,8 @@ struct AgentCard: View {
                 }
             }
 
-            // Task description
-            Text(agent.task)
+            // Task description (cleaned of technical IDs)
+            Text(cleanedTask)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -496,6 +508,24 @@ struct AgentDetailPanel: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// Strips GUID suffixes from agent names
+    private var displayName: String {
+        let name = agent.name
+        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
+            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        return name
+    }
+
+    /// Format conversation date for display
+    private var conversationDateString: String {
+        let date = Date(timeIntervalSince1970: TimeInterval(agent.startTime) / 1000.0)
+        let formatter = DateFormatter()
+        formatter.dateStyle = .long
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -506,7 +536,7 @@ struct AgentDetailPanel: View {
                             .foregroundStyle(statusColor)
                             .font(.title2)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(agent.name)
+                            Text(displayName)
                                 .font(.headline)
                             Text(agent.task)
                                 .font(.subheadline)
@@ -535,7 +565,7 @@ struct AgentDetailPanel: View {
 
                         DetailRow(label: "Model", value: agent.model)
                         DetailRow(label: "Provider", value: agent.sourceProvider)
-                        DetailRow(label: "Elapsed", value: agent.elapsed)
+                        DetailRow(label: "Date", value: conversationDateString)
                         DetailRow(label: "Tokens", value: formatTokens(agent.tokens))
                         DetailRow(label: "Location", value: agent.remoteHost ?? agent.location.rawValue.capitalized)
 
@@ -776,6 +806,24 @@ struct ConversationView: View {
     @State private var errorMessage: String?
     @State private var searchText: String = ""
 
+    /// Strips GUID suffixes from agent names for cleaner display
+    private var displayAgentName: String {
+        let name = agent.name
+        if let range = name.range(of: #" [a-fA-F0-9]{6,}\.*$"#, options: .regularExpression) {
+            return String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        return name
+    }
+
+    /// Format conversation date for title
+    private var conversationDateString: String {
+        let date = Date(timeIntervalSince1970: TimeInterval(agent.startTime) / 1000.0)
+        let formatter = DateFormatter()
+        formatter.dateStyle = .long
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     /// Detect if the agent is likely waiting for user input:
     /// status is running/thinking AND the last message is from the assistant (not user).
     private var isAwaitingInput: Bool {
@@ -849,24 +897,18 @@ struct ConversationView: View {
                     }
                 }
             }
-            .navigationTitle("Conversation")
+            .navigationTitle(displayAgentName)
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Search messages...")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(agent.name)
-                            .font(.caption)
-                            .fontWeight(.medium)
-                        if isAwaitingInput {
-                            Text("Waiting for input")
-                                .font(.caption2)
-                                .foregroundStyle(.red)
-                        } else {
-                            Text("\(turns.count) messages")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+                // Show date in header
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 2) {
+                        Text(displayAgentName)
+                            .font(.headline)
+                        Text(conversationDateString)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1035,7 +1077,14 @@ struct ConversationBubble: View {
     private func formatTimestamp(_ ts: Double) -> String {
         let date = Date(timeIntervalSince1970: ts / 1000.0)
         let formatter = DateFormatter()
-        formatter.timeStyle = .short
+        // Show date if not today, otherwise just time
+        if Calendar.current.isDateInToday(date) {
+            formatter.timeStyle = .short
+            formatter.dateStyle = .none
+        } else {
+            formatter.timeStyle = .short
+            formatter.dateStyle = .short
+        }
         return formatter.string(from: date)
     }
 
