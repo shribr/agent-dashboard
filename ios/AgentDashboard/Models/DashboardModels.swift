@@ -298,6 +298,7 @@ struct ConversationTurn: Codable, Identifiable {
 struct ConversationResponse: Codable {
     let agentId: String
     let turns: [ConversationTurn]
+    let error: String?
 }
 
 // MARK: - Health Check Response

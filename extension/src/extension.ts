@@ -3195,11 +3195,14 @@ class DashboardProvider {
         const agentId = decodeURIComponent(convoMatch[1]);
         this.outputChannel.appendLine(`[api] Conversation request for ${agentId}`);
         this.getConversationForApi(agentId).then(turns => {
+          this.outputChannel.appendLine(`[api] Returning ${turns.length} turns for ${agentId}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ agentId, turns }));
         }).catch((err: any) => {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err?.message || 'Failed to load conversation' }));
+          this.outputChannel.appendLine(`[api] Conversation error for ${agentId}: ${err?.message}`);
+          // Return 200 with empty turns + error info instead of 500 to avoid iOS URLError
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ agentId, turns: [], error: err?.message || 'Failed to load conversation' }));
         });
         return;
       }

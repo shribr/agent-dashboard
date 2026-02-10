@@ -160,20 +160,36 @@ class DashboardService: ObservableObject {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
-        guard httpResponse.statusCode == 200 else {
-            print("[DashboardService] Conversation HTTP \(httpResponse.statusCode) for \(agentId)")
-            throw URLError(.badServerResponse)
+
+        // Log response for debugging
+        let statusCode = httpResponse.statusCode
+        if let rawString = String(data: data, encoding: .utf8) {
+            let preview = rawString.prefix(500)
+            print("[DashboardService] Conversation HTTP \(statusCode) (\(data.count) bytes): \(preview)")
         }
 
-        // Log raw response for debugging
-        if let rawString = String(data: data, encoding: .utf8) {
-            let preview = rawString.prefix(300)
-            print("[DashboardService] Conversation response (\(data.count) bytes): \(preview)...")
+        guard statusCode == 200 else {
+            // Try to extract error message from response body
+            var serverError = "HTTP \(statusCode)"
+            if let errorJson = try? JSONDecoder().decode([String: String].self, from: data),
+               let msg = errorJson["error"] {
+                serverError = msg
+            }
+            print("[DashboardService] Conversation error: \(serverError)")
+            throw NSError(domain: "DashboardService", code: statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "Server returned \(serverError)"
+            ])
         }
 
         let decoder = JSONDecoder()
         let result = try decoder.decode(ConversationResponse.self, from: data)
         print("[DashboardService] Decoded \(result.turns.count) turns for \(agentId)")
+        // Check for server-side error message
+        if let serverError = result.error, !serverError.isEmpty, result.turns.isEmpty {
+            throw NSError(domain: "DashboardService", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: serverError
+            ])
+        }
         return result.turns
     }
 
