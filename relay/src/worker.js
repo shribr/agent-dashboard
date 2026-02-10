@@ -21,6 +21,9 @@
 let cachedState = null;
 let lastUpdated = null;
 
+// In-memory conversation cache: agentId → { turns, updatedAt }
+const conversationCache = new Map();
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -29,7 +32,7 @@ export default {
     // CORS headers for all responses
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
 
@@ -101,13 +104,75 @@ export default {
       }, 200, corsHeaders);
     }
 
+    // ─── POST /api/conversations — VS Code pushes conversation data ────
+    if (path === '/api/conversations' && request.method === 'POST') {
+      const authHeader = request.headers.get('Authorization');
+      const expectedToken = env.AUTH_TOKEN || 'change-me-to-a-random-secret';
+
+      if (authHeader !== `Bearer ${expectedToken}`) {
+        return jsonResponse({ error: 'Unauthorized' }, 401, corsHeaders);
+      }
+
+      try {
+        const body = await request.json();
+        // body: { agentId: string, turns: ConversationTurn[] }
+        const { agentId, turns } = body;
+        if (!agentId) {
+          return jsonResponse({ error: 'Missing agentId' }, 400, corsHeaders);
+        }
+
+        conversationCache.set(agentId, {
+          turns: turns || [],
+          updatedAt: new Date().toISOString(),
+        });
+
+        // Persist to KV if available
+        if (env.DASHBOARD_STATE) {
+          await env.DASHBOARD_STATE.put(`convo:${agentId}`, JSON.stringify({
+            turns: turns || [],
+            updatedAt: new Date().toISOString(),
+          }));
+        }
+
+        return jsonResponse({ ok: true, agentId, turnCount: (turns || []).length }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ error: 'Invalid JSON' }, 400, corsHeaders);
+      }
+    }
+
+    // ─── GET /api/agents/:id/conversation — iOS fetches conversation ───
+    const convoMatch = path.match(/^\/api\/agents\/([^/]+)\/conversation\/?$/);
+    if (convoMatch && request.method === 'GET') {
+      const agentId = decodeURIComponent(convoMatch[1]);
+
+      // Try in-memory first
+      const cached = conversationCache.get(agentId);
+      if (cached) {
+        return jsonResponse({ agentId, turns: cached.turns }, 200, corsHeaders);
+      }
+
+      // Fall back to KV
+      if (env.DASHBOARD_STATE) {
+        const stored = await env.DASHBOARD_STATE.get(`convo:${agentId}`);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          conversationCache.set(agentId, parsed);
+          return jsonResponse({ agentId, turns: parsed.turns }, 200, corsHeaders);
+        }
+      }
+
+      // No conversation found — return empty (not 404, to match extension behavior)
+      return jsonResponse({ agentId, turns: [] }, 200, corsHeaders);
+    }
+
     // ─── GET /api/health — health check ────────────────────────────────
     if (path === '/api/health') {
       return jsonResponse({
         status: 'ok',
-        version: '0.3.0',
+        version: '0.4.0',
         relay: true,
         hasState: cachedState !== null,
+        conversationsCached: conversationCache.size,
         lastUpdated,
       }, 200, corsHeaders);
     }
@@ -118,6 +183,8 @@ export default {
       endpoints: [
         'GET  /api/state  — fetch latest dashboard state',
         'POST /api/state  — push dashboard state (requires Bearer token)',
+        'GET  /api/agents/:id/conversation — fetch conversation history',
+        'POST /api/conversations — push conversation data (requires Bearer token)',
         'GET  /api/health — health check',
       ]
     }, 404, corsHeaders);

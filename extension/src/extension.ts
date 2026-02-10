@@ -2710,6 +2710,7 @@ class DashboardProvider {
   private outputChannel: vscode.OutputChannel;
   private apiServer: http.Server | undefined;
   private lastState: DashboardState | undefined;
+  private lastConvoPushTime: number = 0;
   private agentFirstSeen: Map<string, number> = new Map();
   private previousAgentStatuses: Map<string, string> = new Map();
   private previousProviderStates: Map<string, HealthState> = new Map();
@@ -3098,6 +3099,12 @@ class DashboardProvider {
 
     // Push to cloud relay if configured (fire-and-forget)
     this.pushToCloudRelay(state);
+    // Push conversations at most once every 30 seconds to avoid overloading the relay
+    const convoPushNow = Date.now();
+    if (convoPushNow - this.lastConvoPushTime > 30_000) {
+      this.lastConvoPushTime = convoPushNow;
+      this.pushConversationsToRelay(agents);
+    }
 
     if (this.panel) {
       this.outputChannel.appendLine(`[dashboard] Posting state to webview: ${agents.length} agents, ${allActivities.length} activities`);
@@ -3141,6 +3148,56 @@ class DashboardProvider {
       req.end();
     } catch {
       // Cloud relay push is best-effort — never interrupt the main flow
+    }
+  }
+
+  /**
+   * Push conversation history for all agents to the cloud relay.
+   * Called after pushToCloudRelay so the relay has both state + conversations.
+   */
+  private async pushConversationsToRelay(agents: AgentSession[]) {
+    try {
+      const config = vscode.workspace.getConfiguration('agentDashboard');
+      const relayUrl = config.get<string>('cloudRelayUrl', '');
+      const relayToken = config.get<string>('cloudRelayToken', '');
+      if (!relayUrl) { return; }
+
+      const baseUrl = relayUrl.replace(/\/$/, '');
+      const https = await import('https');
+
+      for (const agent of agents) {
+        if (!agent.hasConversationHistory) { continue; }
+
+        try {
+          const turns = await this.getConversationForApi(agent.id);
+          if (turns.length === 0) { continue; }
+
+          const url = baseUrl + '/api/conversations';
+          const httpModule = url.startsWith('https') ? https : await import('http');
+          const parsed = new URL(url);
+          const postData = JSON.stringify({ agentId: agent.id, turns });
+
+          const req = httpModule.request({
+            hostname: parsed.hostname,
+            port: parsed.port || (url.startsWith('https') ? 443 : 80),
+            path: parsed.pathname,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+              ...(relayToken ? { 'Authorization': `Bearer ${relayToken}` } : {}),
+            },
+          }, (res: any) => { res.resume(); });
+
+          req.on('error', () => { /* best-effort */ });
+          req.write(postData);
+          req.end();
+        } catch {
+          // Skip this agent — best-effort
+        }
+      }
+    } catch {
+      // Cloud relay conversation push is best-effort
     }
   }
 
