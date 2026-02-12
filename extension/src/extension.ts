@@ -55,6 +55,8 @@ interface AgentSession {
   tasks?: AgentTask[];
   recentActions?: AgentAction[];
   parentId?: string;
+  workspace?: string;              // Workspace/project name (e.g. "agent-dashboard")
+  projectDescription?: string;     // Short description of the project
   conversationPreview?: string[];  // Recent conversation snippets for the detail panel
   hasConversationHistory?: boolean; // True if full conversation history can be loaded on demand
 }
@@ -92,6 +94,58 @@ interface DataSourceStatus {
   message: string;
   lastChecked: number;
   agentCount: number;
+}
+
+// ─── Workspace Info ──────────────────────────────────────────────────────────
+
+let _cachedWorkspaceInfo: { name: string; description: string } | null = null;
+let _cachedWorkspaceInfoTime = 0;
+
+function getWorkspaceInfo(): { name: string; description: string } {
+  const now = Date.now();
+  // Cache for 30 seconds to avoid repeated filesystem reads every poll
+  if (_cachedWorkspaceInfo && (now - _cachedWorkspaceInfoTime) < 30000) {
+    return _cachedWorkspaceInfo;
+  }
+
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return { name: '', description: '' };
+  }
+
+  const rootPath = folders[0].uri.fsPath;
+  const name = path.basename(rootPath);
+  let description = '';
+
+  // Try package.json description
+  try {
+    const pkgPath = path.join(rootPath, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      if (pkg.description) description = pkg.description;
+    }
+  } catch { /* skip */ }
+
+  // Fallback: first line of README.md after the title
+  if (!description) {
+    try {
+      const readmePath = path.join(rootPath, 'README.md');
+      if (fs.existsSync(readmePath)) {
+        const lines = fs.readFileSync(readmePath, 'utf-8').split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('!') && !trimmed.startsWith('---')) {
+            description = trimmed.substring(0, 200);
+            break;
+          }
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  _cachedWorkspaceInfo = { name, description };
+  _cachedWorkspaceInfoTime = now;
+  return _cachedWorkspaceInfo;
 }
 
 // ─── Model Pricing (per million tokens) ──────────────────────────────────────
@@ -3293,6 +3347,15 @@ class DashboardProvider {
       }
     }
 
+    // Set workspace info on all agents
+    const wsInfo = getWorkspaceInfo();
+    if (wsInfo.name) {
+      for (const [, agent] of agentMap) {
+        if (!agent.workspace) agent.workspace = wsInfo.name;
+        if (!agent.projectDescription && wsInfo.description) agent.projectDescription = wsInfo.description;
+      }
+    }
+
     // Persist first-seen times and update elapsed for each agent
     const now = Date.now();
     for (const [, agent] of agentMap) {
@@ -4528,6 +4591,8 @@ function getWebviewContent(webview: vscode.Webview): string {
     html += '<div class="detail-section">';
     html += '<div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:center;">Status <span class="sb sb-'+agent.status+'">'+agent.status.charAt(0).toUpperCase()+agent.status.slice(1)+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Task</span><span class="detail-value" style="white-space:normal;">'+escHtml(agent.task || '-')+'</span></div>';
+    if (agent.workspace) html += '<div class="detail-row"><span class="detail-label">Workspace</span><span class="detail-value">'+escHtml(agent.workspace)+'</span></div>';
+    if (agent.projectDescription) html += '<div class="detail-row"><span class="detail-label">Project</span><span class="detail-value" style="white-space:normal;font-size:11px;">'+escHtml(agent.projectDescription)+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Model</span><span class="detail-value">'+agent.model+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value">'+agent.sourceProvider+'</span></div>';
     html += '<div class="detail-row"><span class="detail-label">Date</span><span class="detail-value">'+(agent.startTime ? formatConversationDate(agent.startTime) : agent.elapsed)+'</span></div>';
@@ -4759,7 +4824,7 @@ function getWebviewContent(webview: vscode.Webview): string {
       return '<div class="agent-card st-'+a.status+'">'+
         '<div class="agent-top">'+
           '<div class="agent-info">'+
-            '<div class="agent-name">'+stripGuid(a.name)+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span></div>'+
+            '<div class="agent-name">'+stripGuid(a.name)+' <span class="tag tag-'+a.type+'">'+a.typeLabel+'</span> <span class="tag tag-'+a.location+'">'+loc+'</span>'+(a.workspace?' <span class="tag" style="opacity:0.6">'+escHtml(a.workspace)+'</span>':'')+'</div>'+
             '<div class="agent-task">'+escHtml(a.task || 'Chat session')+'</div>'+
           '</div>'+
           '<div class="agent-right">'+

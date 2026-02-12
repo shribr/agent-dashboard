@@ -130,6 +130,8 @@ struct AgentSession: Codable, Identifiable {
     let tasks: [AgentTask]?
     let recentActions: [AgentAction]?
     let parentId: String?
+    let workspace: String?
+    let projectDescription: String?
     let conversationPreview: [String]?
     let hasConversationHistory: Bool?
 }

@@ -349,6 +349,15 @@ struct AgentCard: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+
+                    // Workspace name
+                    if let workspace = agent.workspace, !workspace.isEmpty {
+                        Label(workspace, systemImage: "folder.fill")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.indigo)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer()
@@ -592,6 +601,12 @@ struct AgentDetailPanel: View {
                             .foregroundStyle(.secondary)
                             .tracking(0.5)
 
+                        if let workspace = agent.workspace, !workspace.isEmpty {
+                            DetailRow(label: "Workspace", value: workspace)
+                        }
+                        if let desc = agent.projectDescription, !desc.isEmpty {
+                            DetailRow(label: "Project", value: desc)
+                        }
                         DetailRow(label: "Model", value: agent.model)
                         DetailRow(label: "Provider", value: agent.sourceProvider)
                         DetailRow(label: "Date", value: conversationDateString)
