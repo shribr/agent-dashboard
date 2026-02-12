@@ -766,6 +766,14 @@ class CopilotChatSessionProvider extends DataProvider {
         userDirs.add(path.join(home, '.config', 'Code - Insiders', 'User'));
       }
 
+      // Determine current workspace's storage hash to scope scanning
+      const storageUri = this.context.storageUri;
+      let currentWsHash = '';
+      if (storageUri) {
+        // storageUri = .../workspaceStorage/{hash}/{extensionId}
+        currentWsHash = path.basename(path.dirname(storageUri.fsPath));
+      }
+
       for (const userDir of userDirs) {
         const workspaceStorageDir = path.join(userDir, 'workspaceStorage');
         if (!fs.existsSync(workspaceStorageDir)) {
@@ -773,11 +781,15 @@ class CopilotChatSessionProvider extends DataProvider {
           continue;
         }
 
-        this._outputChannel.appendLine(`[${this.id}] Scanning: ${workspaceStorageDir}`);
+        this._outputChannel.appendLine(`[${this.id}] Scanning: ${workspaceStorageDir}${currentWsHash ? ` (scoped to ${currentWsHash})` : ' (all workspaces)'}`);
         searchedPaths.push(workspaceStorageDir);
         let foundInDir = 0;
 
-        const workspaceDirs = fs.readdirSync(workspaceStorageDir);
+        const allWorkspaceDirs = fs.readdirSync(workspaceStorageDir);
+        // Scope to current workspace if known; otherwise scan all
+        const workspaceDirs = currentWsHash
+          ? allWorkspaceDirs.filter(d => d === currentWsHash)
+          : allWorkspaceDirs;
         for (const wsDir of workspaceDirs) {
           const wsPath = path.join(workspaceStorageDir, wsDir);
 
@@ -2021,10 +2033,32 @@ class ClaudeDesktopTodosProvider extends DataProvider {
     }
 
     // ── Also scan Claude Code JSONL sessions from ~/.claude/projects/ ──
+    // Check if any Claude CLI process is currently running (for live detection)
+    let claudeProcessRunning = false;
+    try {
+      const pgrepOut = await this.execCommand('pgrep', ['-f', 'claude'], 2000);
+      if (pgrepOut && pgrepOut.trim().length > 0) {
+        claudeProcessRunning = true;
+      }
+    } catch { /* pgrep not available or no matches */ }
+
+    // Scope to current workspace: Claude Code encodes paths as /Users/foo/bar → -Users-foo-bar
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const workspaceEncodedDirs = new Set<string>();
+    if (workspaceFolders) {
+      for (const wf of workspaceFolders) {
+        workspaceEncodedDirs.add(wf.uri.fsPath.replace(/\//g, '-'));
+      }
+    }
+
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
     if (fs.existsSync(projectsDir)) {
       try {
-        const projectDirs = fs.readdirSync(projectsDir);
+        const allProjectDirs = fs.readdirSync(projectsDir);
+        // If workspace is open, only scan matching project dirs; otherwise scan all
+        const projectDirs = workspaceEncodedDirs.size > 0
+          ? allProjectDirs.filter(d => workspaceEncodedDirs.has(d))
+          : allProjectDirs;
         for (const projDir of projectDirs) {
           const projPath = path.join(projectsDir, projDir);
           try {
@@ -2127,7 +2161,9 @@ class ClaudeDesktopTodosProvider extends DataProvider {
 
                 if (actions.length === 0 && lines.length < 2) continue;
 
-                const isActive2 = (now - jstat.mtimeMs) < 5 * 60 * 1000;
+                // Active if: modified in last 5 min, OR a Claude process is running and file is recent (last 30 min)
+                const mtimeAge = now - jstat.mtimeMs;
+                const isActive2 = mtimeAge < 5 * 60 * 1000 || (claudeProcessRunning && mtimeAge < 30 * 60 * 1000);
                 const totalTokens = totalInputTokens + totalOutputTokens;
                 const displayModel = sessionModel || 'Claude';
                 const agentCost = calculateCost(totalInputTokens, totalOutputTokens, displayModel, totalCacheCreationTokens, totalCacheReadTokens);
@@ -3203,6 +3239,37 @@ class DashboardProvider {
       agentMap.delete(mostRecent.id);
 
       // Also keep any remaining rich agents (older sessions) as separate cards
+    }
+
+    // ── Cross-provider deduplication for CLI agents ──
+    // TerminalProcessProvider detects agents via ps/terminals (process-{pid}, terminal-{name}-{pid}).
+    // ClaudeDesktopTodosProvider detects Claude sessions via JSONL (claude-code-{sessionId}).
+    // If both exist for the same agent type, keep the richer JSONL/file-based one and absorb the PID.
+    const terminalAgents: AgentSession[] = [];
+    const fileAgents: AgentSession[] = [];
+    for (const [, agent] of agentMap) {
+      if (agent.sourceProvider === 'terminal-processes') {
+        terminalAgents.push(agent);
+      } else if (agent.sourceProvider === 'claude-desktop-todos' || agent.sourceProvider === 'copilot-chat-sessions') {
+        fileAgents.push(agent);
+      }
+    }
+
+    for (const termAgent of terminalAgents) {
+      // Find a file-based agent of the same type
+      const match = fileAgents.find(f => f.type === termAgent.type && f.type !== 'custom');
+      if (match && (match.tokens > 0 || (match.recentActions && match.recentActions.length > 0))) {
+        // File-based agent is richer — absorb PID and remove the terminal agent
+        if (termAgent.pid && !match.pid) {
+          match.pid = termAgent.pid;
+        }
+        if (termAgent.status === 'running') {
+          match.status = 'running';
+          match.progress = 0;
+        }
+        agentMap.delete(termAgent.id);
+        this.outputChannel.appendLine(`[dashboard] Deduped terminal agent "${termAgent.name}" into file-based agent "${match.name}"`);
+      }
     }
 
     // ── Conversation history availability pass ──
