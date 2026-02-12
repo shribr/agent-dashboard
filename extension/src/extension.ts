@@ -36,6 +36,11 @@ interface AgentSession {
   status: 'running' | 'thinking' | 'paused' | 'done' | 'error' | 'queued';
   task: string;
   tokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+  estimatedCost?: number;
   startTime: number;
   elapsed: string;
   progress: number;
@@ -87,6 +92,58 @@ interface DataSourceStatus {
   message: string;
   lastChecked: number;
   agentCount: number;
+}
+
+// ─── Model Pricing (per million tokens) ──────────────────────────────────────
+
+const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
+  'claude-sonnet-4': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  'claude-opus-4':   { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  'claude-3-5-sonnet': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  'claude-3-5-haiku':  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
+  'claude-3-opus':   { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  'gpt-4o':          { input: 2.5, output: 10 },
+  'gpt-4o-mini':     { input: 0.15, output: 0.6 },
+  'o3-mini':         { input: 1.1, output: 4.4 },
+  'o3':              { input: 2, output: 8 },
+};
+
+const DEFAULT_PRICING = { input: 3, output: 15 };
+
+function calculateCost(
+  inputTokens: number,
+  outputTokens: number,
+  model: string,
+  cacheCreationTokens: number = 0,
+  cacheReadTokens: number = 0
+): number {
+  const m = model.toLowerCase();
+  let pricing: typeof MODEL_PRICING[string] | undefined;
+
+  // Prefix match against known model IDs
+  for (const [key, p] of Object.entries(MODEL_PRICING)) {
+    if (m.startsWith(key) || m.includes(key)) {
+      pricing = p;
+      break;
+    }
+  }
+
+  // Fuzzy fallback on model family name
+  if (!pricing) {
+    if (m.includes('opus')) pricing = MODEL_PRICING['claude-opus-4'];
+    else if (m.includes('haiku')) pricing = MODEL_PRICING['claude-3-5-haiku'];
+    else if (m.includes('gpt-4o-mini')) pricing = MODEL_PRICING['gpt-4o-mini'];
+    else if (m.includes('gpt-4o') || m.includes('gpt-4')) pricing = MODEL_PRICING['gpt-4o'];
+    else if (m.includes('o3-mini')) pricing = MODEL_PRICING['o3-mini'];
+    else if (m.includes('o3')) pricing = MODEL_PRICING['o3'];
+  }
+
+  const p = (pricing || DEFAULT_PRICING) as { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  let cost = (inputTokens / 1_000_000) * p.input
+           + (outputTokens / 1_000_000) * p.output;
+  if (p.cacheRead) cost += (cacheReadTokens / 1_000_000) * p.cacheRead;
+  if (p.cacheWrite) cost += (cacheCreationTokens / 1_000_000) * p.cacheWrite;
+  return cost;
 }
 
 /**
@@ -1454,7 +1511,7 @@ class TerminalProcessProvider extends DataProvider {
           let pid: number | undefined;
           try { pid = await terminal.processId; } catch { /* may not be available */ }
 
-          this._agents.push({
+          const termAgent: AgentSession = {
             id: `terminal-${terminal.name}-${pid || Date.now()}`,
             name: terminal.name,
             type: this.inferTerminalType(name),
@@ -1473,7 +1530,15 @@ class TerminalProcessProvider extends DataProvider {
             location: 'local',
             pid,
             sourceProvider: this.id
-          });
+          };
+          this._agents.push(termAgent);
+
+          // Enrich with token data from local files
+          if (name.includes('aider')) {
+            await this.enrichAiderAgent(termAgent);
+          } else if (name.includes('codex')) {
+            await this.enrichCodexAgent(termAgent);
+          }
         }
       } catch { /* skip terminal */ }
     }
@@ -1503,7 +1568,7 @@ class TerminalProcessProvider extends DataProvider {
             const parts = line.trim().split(/\s+/);
             const pid = parseInt(parts[1]);
             if (pid && !this._agents.some(a => a.pid === pid)) {
-              this._agents.push({
+              const psAgent: AgentSession = {
                 id: `process-${pid}`,
                 name: `${label} (PID ${pid})`,
                 type,
@@ -1522,7 +1587,15 @@ class TerminalProcessProvider extends DataProvider {
                 location: 'local',
                 pid,
                 sourceProvider: this.id
-              });
+              };
+              this._agents.push(psAgent);
+
+              // Enrich with token data from local files
+              if (label === 'Aider') {
+                await this.enrichAiderAgent(psAgent);
+              } else if (label === 'Codex') {
+                await this.enrichCodexAgent(psAgent);
+              }
             }
           }
         }
@@ -1547,6 +1620,146 @@ class TerminalProcessProvider extends DataProvider {
     if (name.includes('copilot')) return 'Copilot';
     if (name.includes('codex')) return 'Codex';
     return 'Agent';
+  }
+
+  private async enrichAiderAgent(agent: AgentSession): Promise<void> {
+    // Strategy 1: Check workspace folders for .aider.chat.history.md
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    let historyPath: string | null = null;
+
+    if (workspaceFolders) {
+      for (const folder of workspaceFolders) {
+        const candidate = path.join(folder.uri.fsPath, '.aider.chat.history.md');
+        if (fs.existsSync(candidate)) {
+          historyPath = candidate;
+          break;
+        }
+      }
+    }
+
+    // Strategy 2: Use lsof to find CWD of PID, then check there
+    if (!historyPath && agent.pid) {
+      try {
+        const lsofOutput = await this.execCommand('lsof', ['-p', String(agent.pid), '-Fn'], 3000);
+        if (lsofOutput) {
+          const lines = lsofOutput.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i] === 'fcwd' && i + 1 < lines.length && lines[i + 1].startsWith('n')) {
+              const dir = lines[i + 1].substring(1);
+              const candidate = path.join(dir, '.aider.chat.history.md');
+              if (fs.existsSync(candidate)) {
+                historyPath = candidate;
+                break;
+              }
+            }
+          }
+        }
+      } catch { /* lsof not available */ }
+    }
+
+    if (!historyPath) return;
+
+    try {
+      const stat = fs.statSync(historyPath);
+      if (stat.size > 5 * 1024 * 1024) return; // Skip files > 5MB
+
+      const raw = fs.readFileSync(historyPath, 'utf-8');
+      const tokenRegex = /> Tokens: ([\d,k]+) sent,\s*(?:([\d,k]+) cache hit,\s*)?([\d,k]+) received\.\s*Cost: \$([\d.]+) message, \$([\d.]+) session\./gi;
+      let lastMatch: RegExpExecArray | null = null;
+      let match: RegExpExecArray | null;
+      while ((match = tokenRegex.exec(raw)) !== null) {
+        lastMatch = match;
+      }
+
+      if (lastMatch) {
+        const parseK = (s: string): number => {
+          s = s.replace(/,/g, '');
+          if (s.toLowerCase().endsWith('k')) return Math.round(parseFloat(s) * 1000);
+          return parseInt(s, 10) || 0;
+        };
+        const sent = parseK(lastMatch[1]);
+        const received = parseK(lastMatch[3]);
+        const sessionCost = parseFloat(lastMatch[5]);
+
+        agent.tokens = sent + received;
+        agent.inputTokens = sent;
+        agent.outputTokens = received;
+        agent.estimatedCost = sessionCost;
+      }
+    } catch (e: any) {
+      this._outputChannel.appendLine(`[${this.id}] Failed to parse Aider history: ${e?.message}`);
+    }
+  }
+
+  private async enrichCodexAgent(agent: AgentSession): Promise<void> {
+    const codexDir = path.join(os.homedir(), '.codex', 'sessions');
+    if (!fs.existsSync(codexDir)) return;
+
+    try {
+      const now = new Date();
+      const dateDirs = [
+        path.join(codexDir, String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')),
+        // Also check yesterday
+        ...(() => {
+          const y = new Date(now.getTime() - 86400000);
+          return [path.join(codexDir, String(y.getFullYear()), String(y.getMonth() + 1).padStart(2, '0'), String(y.getDate()).padStart(2, '0'))];
+        })(),
+      ];
+
+      let totalInput = 0;
+      let totalOutput = 0;
+      let sessionModel = '';
+      let found = false;
+
+      for (const dateDir of dateDirs) {
+        if (!fs.existsSync(dateDir)) continue;
+        const jsonlFiles = fs.readdirSync(dateDir)
+          .filter(f => f.startsWith('rollout-') && f.endsWith('.jsonl'))
+          .map(f => {
+            const fp = path.join(dateDir, f);
+            return { name: f, path: fp, stat: fs.statSync(fp) };
+          })
+          .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+
+        for (const jf of jsonlFiles.slice(0, 3)) {
+          if (jf.stat.size > 5 * 1024 * 1024) continue;
+          const raw = fs.readFileSync(jf.path, 'utf-8');
+          const lines = raw.split('\n').filter(l => l.trim());
+
+          for (const line of lines) {
+            try {
+              const event = JSON.parse(line);
+              if (event.type === 'turn.completed' && event.usage) {
+                totalInput += event.usage.input_tokens || 0;
+                totalOutput += event.usage.output_tokens || 0;
+                if (event.model) sessionModel = event.model;
+                found = true;
+              }
+              // token_count events report cumulative totals
+              if (event.payload?.type === 'token_count' && event.payload.total_token_usage) {
+                totalInput = event.payload.total_token_usage.input_tokens || totalInput;
+                totalOutput = event.payload.total_token_usage.output_tokens || totalOutput;
+                found = true;
+              }
+            } catch { /* skip line */ }
+          }
+
+          if (found) break;
+        }
+        if (found) break;
+      }
+
+      if (found && (totalInput + totalOutput) > 0) {
+        const model = sessionModel || 'o3-mini';
+        agent.tokens = totalInput + totalOutput;
+        agent.inputTokens = totalInput;
+        agent.outputTokens = totalOutput;
+        agent.model = model;
+        agent.estimatedCost = calculateCost(totalInput, totalOutput, model);
+      }
+    } catch (e: any) {
+      this._outputChannel.appendLine(`[${this.id}] Failed to parse Codex sessions: ${e?.message}`);
+    }
   }
 }
 
@@ -1843,6 +2056,9 @@ class ClaudeDesktopTodosProvider extends DataProvider {
                 let lastTask = '';
                 let totalInputTokens = 0;
                 let totalOutputTokens = 0;
+                let totalCacheCreationTokens = 0;
+                let totalCacheReadTokens = 0;
+                let sessionModel = '';
 
                 for (const line of lines) {
                   try {
@@ -1899,6 +2115,12 @@ class ClaudeDesktopTodosProvider extends DataProvider {
                     if (msg.usage) {
                       totalInputTokens += msg.usage.input_tokens || 0;
                       totalOutputTokens += msg.usage.output_tokens || 0;
+                      totalCacheCreationTokens += msg.usage.cache_creation_input_tokens || 0;
+                      totalCacheReadTokens += msg.usage.cache_read_input_tokens || 0;
+                    }
+                    // Model extraction
+                    if (msg.message?.model && typeof msg.message.model === 'string') {
+                      sessionModel = msg.message.model;
                     }
                   } catch { /* skip line */ }
                 }
@@ -1907,6 +2129,8 @@ class ClaudeDesktopTodosProvider extends DataProvider {
 
                 const isActive2 = (now - jstat.mtimeMs) < 5 * 60 * 1000;
                 const totalTokens = totalInputTokens + totalOutputTokens;
+                const displayModel = sessionModel || 'Claude';
+                const agentCost = calculateCost(totalInputTokens, totalOutputTokens, displayModel, totalCacheCreationTokens, totalCacheReadTokens);
 
                 const claudeAgentId = `claude-code-${sessionId}`;
                 this._agentFilePaths.set(claudeAgentId, jf.path);
@@ -1916,10 +2140,15 @@ class ClaudeDesktopTodosProvider extends DataProvider {
                   name: `Claude Code ${sessionId}`,
                   type: 'claude',
                   typeLabel: 'Claude Code',
-                  model: 'Claude',
+                  model: displayModel,
                   status: isActive2 ? 'running' : 'done',
                   task: lastTask || 'Claude Code session',
                   tokens: totalTokens,
+                  inputTokens: totalInputTokens,
+                  outputTokens: totalOutputTokens,
+                  cacheCreationTokens: totalCacheCreationTokens || undefined,
+                  cacheReadTokens: totalCacheReadTokens || undefined,
+                  estimatedCost: agentCost,
                   startTime: jstat.birthtimeMs || jstat.mtimeMs,
                   elapsed: this.formatElapsed(now - (jstat.birthtimeMs || jstat.mtimeMs)),
                   progress: isActive2 ? 0 : 100,
@@ -3059,7 +3288,10 @@ class DashboardProvider {
         active: activeAgents.length,
         completed: completedAgents.length,
         tokens: totalTokens,
-        estimatedCost: (totalTokens / 1000000) * 6,
+        estimatedCost: agents.reduce((sum, a) => {
+          if (a.estimatedCost !== undefined && a.estimatedCost > 0) return sum + a.estimatedCost;
+          return sum + (a.tokens / 1_000_000) * 6; // fallback for agents without per-agent cost
+        }, 0),
         avgDuration: '—'
       },
       dataSourceHealth: this.providers.map(p => {
@@ -4236,7 +4468,20 @@ function getWebviewContent(webview: vscode.Webview): string {
     html += '<div class="detail-row"><span class="detail-label">Location</span><span class="detail-value">'+loc+'</span></div>';
     if (agent.pid) html += '<div class="detail-row"><span class="detail-label">PID</span><span class="detail-value">'+agent.pid+'</span></div>';
     if (agent.activeTool) html += '<div class="detail-row"><span class="detail-label">Active Tool</span><span class="detail-value">'+agent.activeTool+'</span></div>';
-    if (agent.tokens) html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">'+fmt(agent.tokens)+'</span></div>';
+    if (agent.tokens) {
+      html += '<div class="detail-row"><span class="detail-label">Tokens</span><span class="detail-value">'+fmt(agent.tokens)+'</span></div>';
+      if (agent.inputTokens || agent.outputTokens) {
+        html += '<div class="detail-row" style="padding-left:12px;"><span class="detail-label" style="font-size:11px;opacity:0.7">Input</span><span class="detail-value" style="font-size:11px;">'+fmt(agent.inputTokens||0)+'</span></div>';
+        html += '<div class="detail-row" style="padding-left:12px;"><span class="detail-label" style="font-size:11px;opacity:0.7">Output</span><span class="detail-value" style="font-size:11px;">'+fmt(agent.outputTokens||0)+'</span></div>';
+      }
+      if (agent.cacheCreationTokens || agent.cacheReadTokens) {
+        html += '<div class="detail-row" style="padding-left:12px;"><span class="detail-label" style="font-size:11px;opacity:0.7">Cache Write</span><span class="detail-value" style="font-size:11px;">'+fmt(agent.cacheCreationTokens||0)+'</span></div>';
+        html += '<div class="detail-row" style="padding-left:12px;"><span class="detail-label" style="font-size:11px;opacity:0.7">Cache Read</span><span class="detail-value" style="font-size:11px;">'+fmt(agent.cacheReadTokens||0)+'</span></div>';
+      }
+      if (agent.estimatedCost !== undefined && agent.estimatedCost > 0) {
+        html += '<div class="detail-row"><span class="detail-label">Est. Cost</span><span class="detail-value">~$'+agent.estimatedCost.toFixed(4)+'</span></div>';
+      }
+    }
     html += '</div>';
 
     // Tasks / Todos
@@ -4459,7 +4704,7 @@ function getWebviewContent(webview: vscode.Webview): string {
         '<div class="agent-meta">'+
           '<span>'+a.model+'</span>'+
           '<span>'+(a.startTime ? formatConversationDate(a.startTime).split(' at ')[0] : a.elapsed)+'</span>'+
-          (a.tokens?'<span>'+fmt(a.tokens)+' tokens</span>':'')+
+          (a.tokens?'<span>'+fmt(a.tokens)+' tokens'+(a.estimatedCost?' (~$'+a.estimatedCost.toFixed(2)+')':'')+'</span>':'')+
           (hasTasks?'<span>'+tasks.filter(function(t) { return t.status==='completed'; }).length+'/'+tasks.length+' tasks</span>':'')+
           '<span style="opacity:0.5">via '+a.sourceProvider+'</span>'+
         '</div>'+

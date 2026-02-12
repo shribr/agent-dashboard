@@ -441,6 +441,22 @@ struct AgentCard: View {
                 .foregroundStyle(.secondary)
             }
 
+            // Token count and cost
+            if agent.tokens > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "number.circle")
+                        .font(.caption2)
+                    Text(formatTokens(agent.tokens) + " tokens")
+                        .font(.caption2)
+                    if let cost = agent.estimatedCost, cost > 0 {
+                        Text("(~" + String(format: "$%.2f", cost) + ")")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
+
             // Progress bar (if active)
             if agent.status == .running || agent.status == .thinking {
                 VStack(alignment: .leading, spacing: 4) {
@@ -580,6 +596,19 @@ struct AgentDetailPanel: View {
                         DetailRow(label: "Provider", value: agent.sourceProvider)
                         DetailRow(label: "Date", value: conversationDateString)
                         DetailRow(label: "Tokens", value: formatTokens(agent.tokens))
+                        if let input = agent.inputTokens, let output = agent.outputTokens, (input + output) > 0 {
+                            DetailRow(label: "  Input", value: formatTokens(input))
+                            DetailRow(label: "  Output", value: formatTokens(output))
+                        }
+                        if let cacheWrite = agent.cacheCreationTokens, cacheWrite > 0 {
+                            DetailRow(label: "  Cache Write", value: formatTokens(cacheWrite))
+                        }
+                        if let cacheRead = agent.cacheReadTokens, cacheRead > 0 {
+                            DetailRow(label: "  Cache Read", value: formatTokens(cacheRead))
+                        }
+                        if let cost = agent.estimatedCost, cost > 0 {
+                            DetailRow(label: "Est. Cost", value: String(format: "~$%.4f", cost))
+                        }
                         DetailRow(label: "Location", value: agent.remoteHost ?? agent.location.rawValue.capitalized)
 
                         if let pid = agent.pid {

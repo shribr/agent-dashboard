@@ -52,6 +52,12 @@ These types are the shared contract across all three components. When modifying 
 
 ```
 AgentSession    — an active agent (id, name, type, status, tokens, tasks, etc.)
+  tokens          — total tokens (input + output), always present
+  inputTokens?    — input tokens only (when available)
+  outputTokens?   — output tokens only (when available)
+  cacheCreationTokens? — cache write tokens (Claude only)
+  cacheReadTokens?     — cache read tokens (Claude only)
+  estimatedCost?  — per-agent cost estimate in USD (model-aware)
 AgentTask       — a todo item (content, status: pending/in_progress/completed)
 AgentAction     — a recent tool invocation (tool, detail, timestamp, status)
 ConversationTurn — a conversation message (role, content, toolCalls)
@@ -59,6 +65,21 @@ ActivityItem    — a feed entry (agent, desc, type, timestamp)
 DashboardState  — root state: agents, activities, stats, dataSourceHealth
 DataSourceStatus — provider health (name, id, state, message, agentCount)
 ```
+
+## Token Usage & Cost Calculation
+
+Token data is sourced differently per agent type:
+
+| Agent | Source | Fields Populated |
+| ----- | ------ | --------------- |
+| Claude Code | `~/.claude/projects/*/*.jsonl` — `msg.usage` | All (input, output, cache, cost) |
+| Aider | `.aider.chat.history.md` — `> Tokens:` lines | input, output, cost (from embedded $) |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | input, output, cost (calculated) |
+| Copilot | Not available (subscription model) | tokens: 0 |
+
+Cost is calculated via `calculateCost()` using a `MODEL_PRICING` table (per-million-token rates). The table covers Claude Opus/Sonnet/Haiku, GPT-4o, and o3 models. Fuzzy model-name matching handles version suffixes. Fallback: $3/$15 per M (Sonnet-tier).
+
+The aggregate `stats.estimatedCost` sums per-agent costs when available, falling back to $6/M for agents without a per-agent cost.
 
 ## Coding Conventions
 

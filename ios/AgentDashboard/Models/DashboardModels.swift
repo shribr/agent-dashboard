@@ -111,6 +111,11 @@ struct AgentSession: Codable, Identifiable {
     let status: AgentStatus
     let task: String
     let tokens: Int
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheCreationTokens: Int?
+    let cacheReadTokens: Int?
+    let estimatedCost: Double?
     let startTime: Double
     let elapsed: String
     let progress: Double
