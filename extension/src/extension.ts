@@ -4164,6 +4164,164 @@ class DashboardProvider {
     } catch { /* best-effort */ }
   }
 
+  // ── Cloud Relay Setup ───────────────────────────────────────────────────────
+
+  async setupCloudRelay() {
+    // 1. Locate the relay directory (bundled with extension or in workspace)
+    const extPath = vscode.extensions.getExtension('amischreiber.agent-dashboard')?.extensionPath;
+    const candidates = [
+      extPath ? path.join(extPath, 'relay') : '',
+      vscode.workspace.workspaceFolders?.[0]
+        ? path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'relay')
+        : '',
+    ].filter(p => p && fs.existsSync(path.join(p, 'wrangler.toml')));
+
+    let relayDir = candidates[0];
+    if (!relayDir) {
+      const pick = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: 'Select relay/ folder',
+        title: 'Locate the Agent Dashboard relay directory (contains wrangler.toml)',
+      });
+      if (!pick?.[0]) { return; }
+      relayDir = pick[0].fsPath;
+      if (!fs.existsSync(path.join(relayDir, 'wrangler.toml'))) {
+        vscode.window.showErrorMessage('Selected folder does not contain wrangler.toml');
+        return;
+      }
+    }
+
+    // 2. Check wrangler is available
+    try {
+      cp.execSync('npx wrangler --version', { cwd: relayDir, encoding: 'utf-8', timeout: 15000 });
+    } catch {
+      const install = await vscode.window.showErrorMessage(
+        'wrangler is not installed in the relay directory.',
+        'Run npm install',
+      );
+      if (install) {
+        const term = vscode.window.createTerminal({ name: 'Relay Setup', cwd: relayDir });
+        term.show();
+        term.sendText('npm install && echo "\\n✅ Dependencies installed. Run the setup command again."');
+      }
+      return;
+    }
+
+    // 3. Check Cloudflare login
+    try {
+      cp.execSync('npx wrangler whoami', { cwd: relayDir, encoding: 'utf-8', timeout: 15000 });
+    } catch {
+      const login = await vscode.window.showWarningMessage(
+        'You are not logged into Cloudflare. Login is required to deploy the relay.',
+        'Login with wrangler',
+      );
+      if (login) {
+        const term = vscode.window.createTerminal({ name: 'Relay Setup', cwd: relayDir });
+        term.show();
+        term.sendText('npx wrangler login && echo "\\n✅ Logged in. Run the setup command again."');
+      }
+      return;
+    }
+
+    // 4. Generate a random auth token
+    const authToken = crypto.randomBytes(32).toString('hex');
+
+    // 5. Run KV namespace creation
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Setting up Cloud Relay...',
+      cancellable: false,
+    }, async (progress) => {
+      try {
+        // Check for existing KV namespace
+        progress.report({ message: 'Checking KV namespaces...' });
+        let kvId: string | null = null;
+        try {
+          const listOutput = cp.execSync('npx wrangler kv namespace list', {
+            cwd: relayDir, encoding: 'utf-8', timeout: 30000,
+          });
+          const namespaces = JSON.parse(listOutput);
+          const existing = namespaces.find((ns: any) => ns.title?.includes('DASHBOARD_STATE'));
+          if (existing) {
+            kvId = existing.id;
+            this.outputChannel.appendLine(`[relay-setup] Found existing KV namespace: ${kvId}`);
+          }
+        } catch { /* no existing namespaces */ }
+
+        // Create if needed
+        if (!kvId) {
+          progress.report({ message: 'Creating KV namespace...' });
+          const createOutput = cp.execSync('npx wrangler kv namespace create DASHBOARD_STATE', {
+            cwd: relayDir, encoding: 'utf-8', timeout: 30000,
+          });
+          const match = createOutput.match(/id\s*=\s*"([a-f0-9]+)"/);
+          if (match) {
+            kvId = match[1];
+            this.outputChannel.appendLine(`[relay-setup] Created KV namespace: ${kvId}`);
+          } else {
+            throw new Error(`Could not parse KV ID from: ${createOutput}`);
+          }
+        }
+
+        // Patch wrangler.toml
+        progress.report({ message: 'Configuring wrangler.toml...' });
+        const tomlPath = path.join(relayDir!, 'wrangler.toml');
+        let toml = fs.readFileSync(tomlPath, 'utf-8');
+
+        // Update or add KV binding
+        if (/^\[\[kv_namespaces\]\]/m.test(toml)) {
+          toml = toml.replace(/^(id\s*=\s*)"[^"]*"/m, `$1"${kvId}"`);
+        } else {
+          toml = toml.replace(
+            /# Create via:.*\n(#\s*\[\[kv_namespaces\]\]\n#\s*binding\s*=.*\n#\s*id\s*=.*\n)/m,
+            `# Create via: npx wrangler kv namespace create DASHBOARD_STATE\n[[kv_namespaces]]\nbinding = "DASHBOARD_STATE"\nid = "${kvId}"\n`
+          );
+        }
+
+        // Update auth token
+        toml = toml.replace(
+          /^AUTH_TOKEN\s*=\s*"[^"]*"/m,
+          `AUTH_TOKEN = "${authToken}"`
+        );
+
+        fs.writeFileSync(tomlPath, toml);
+
+        // Deploy
+        progress.report({ message: 'Deploying worker...' });
+        const deployOutput = cp.execSync('npx wrangler deploy', {
+          cwd: relayDir, encoding: 'utf-8', timeout: 60000,
+        });
+        this.outputChannel.appendLine(`[relay-setup] Deploy output:\n${deployOutput}`);
+
+        // Parse worker URL from deploy output
+        // Wrangler prints something like: https://agent-dashboard-relay.username.workers.dev
+        const urlMatch = deployOutput.match(/(https:\/\/[^\s]+\.workers\.dev)/);
+        const workerUrl = urlMatch?.[1];
+
+        if (!workerUrl) {
+          throw new Error(`Could not parse worker URL from deploy output:\n${deployOutput}`);
+        }
+
+        // Auto-configure VS Code settings
+        progress.report({ message: 'Configuring extension settings...' });
+        const config = vscode.workspace.getConfiguration('agentDashboard');
+        await config.update('cloudRelayUrl', workerUrl, vscode.ConfigurationTarget.Global);
+        await config.update('cloudRelayToken', authToken, vscode.ConfigurationTarget.Global);
+
+        vscode.window.showInformationMessage(
+          `Cloud Relay deployed to ${workerUrl}. Settings configured automatically.`
+        );
+
+        this.outputChannel.appendLine(`[relay-setup] Complete! URL: ${workerUrl}`);
+      } catch (err: any) {
+        this.outputChannel.appendLine(`[relay-setup] Error: ${err?.message}`);
+        vscode.window.showErrorMessage(`Cloud Relay setup failed: ${err?.message}`);
+      }
+    });
+  }
+
   dispose() {
     this.deregisterInstance();
     this.panel?.dispose();
@@ -4177,7 +4335,7 @@ class DashboardProvider {
 
 let dashboardProvider: DashboardProvider;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   dashboardProvider = new DashboardProvider(context);
 
   context.subscriptions.push(
@@ -4185,7 +4343,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('agentDashboard.refresh', () => dashboardProvider.refresh()),
     vscode.commands.registerCommand('agentDashboard.startApi', () => dashboardProvider.startApiServer()),
     vscode.commands.registerCommand('agentDashboard.stopApi', () => dashboardProvider.stopApiServer()),
-    vscode.commands.registerCommand('agentDashboard.diagnostics', () => dashboardProvider.runDiagnostics())
+    vscode.commands.registerCommand('agentDashboard.diagnostics', () => dashboardProvider.runDiagnostics()),
+    vscode.commands.registerCommand('agentDashboard.setupRelay', () => dashboardProvider.setupCloudRelay())
   );
 
   // Auto-start API server if configured
@@ -4200,6 +4359,23 @@ export function activate(context: vscode.ExtensionContext) {
   statusBarItem.tooltip = 'Open Agent Dashboard';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
+
+  // First-run welcome: explain mobile monitoring options
+  if (!context.globalState.get('agentDashboard.welcomeShown')) {
+    context.globalState.update('agentDashboard.welcomeShown', true);
+    const action = await vscode.window.showInformationMessage(
+      'Agent Dashboard installed! Monitor your AI agents from your phone via the companion iOS app. ' +
+      'Local Wi-Fi works out of the box. For remote monitoring from anywhere, set up a free Cloudflare relay.',
+      'Open Dashboard',
+      'Setup Cloud Relay',
+      'Dismiss',
+    );
+    if (action === 'Open Dashboard') {
+      vscode.commands.executeCommand('agentDashboard.open');
+    } else if (action === 'Setup Cloud Relay') {
+      vscode.commands.executeCommand('agentDashboard.setupRelay');
+    }
+  }
 }
 
 export function deactivate() {

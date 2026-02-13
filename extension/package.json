@@ -40,6 +40,10 @@
       {
         "command": "agentDashboard.diagnostics",
         "title": "Agent Dashboard: Show Diagnostics"
+      },
+      {
+        "command": "agentDashboard.setupRelay",
+        "title": "Agent Dashboard: Setup Cloud Relay"
       }
     ],
     "keybindings": [
