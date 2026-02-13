@@ -178,13 +178,14 @@ enum AgentStatus: String, Codable, CaseIterable {
 }
 
 enum AgentLocation: String, Codable {
-    case local, remote, cloud
+    case local, remote, cloud, peer
 
     var iconName: String {
         switch self {
         case .local: return "desktopcomputer"
         case .remote: return "network"
         case .cloud: return "cloud"
+        case .peer: return "rectangle.on.rectangle"
         }
     }
 }

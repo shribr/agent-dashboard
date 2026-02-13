@@ -95,9 +95,21 @@
             "claude-desktop-todos": true,
             "github-actions": true,
             "remote-connections": true,
-            "workspace-activity": true
+            "workspace-activity": true,
+            "peer-instances": true
           },
           "description": "Toggle individual data providers on/off. Disable any provider that causes issues."
+        },
+        "agentDashboard.peerSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-discover and sync with other Agent Dashboard instances running on this machine"
+        },
+        "agentDashboard.peerPorts": {
+          "type": "array",
+          "items": { "type": "number" },
+          "default": [],
+          "description": "Manually specify API ports of other Agent Dashboard instances to sync with. Used in addition to auto-discovery."
         },
         "agentDashboard.apiAutoStart": {
           "type": "boolean",

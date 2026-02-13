@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as cp from 'child_process';
 import * as http from 'http';
+import * as crypto from 'crypto';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ interface AgentSession {
   tools: string[];
   activeTool: string | null;
   files: string[];
-  location: 'local' | 'remote' | 'cloud';
+  location: 'local' | 'remote' | 'cloud' | 'peer';
   remoteHost?: string;
   pid?: number;
   sourceProvider: string;
@@ -3017,6 +3018,168 @@ class AlertEngine {
   }
 }
 
+// ─── Provider: Peer VS Code Instances ─────────────────────────────────────────
+
+class PeerInstanceProvider extends DataProvider {
+  readonly name = 'Peer Instances';
+  readonly id = 'peer-instances';
+
+  private instanceId: string;
+  private registryPath: string;
+
+  constructor(outputChannel: vscode.OutputChannel, instanceId: string) {
+    super(outputChannel);
+    this.instanceId = instanceId;
+    this.registryPath = path.join(os.homedir(), '.agent-dashboard', 'instances.json');
+  }
+
+  protected async fetch(): Promise<void> {
+    this._agents = [];
+    this._activities = [];
+
+    const config = vscode.workspace.getConfiguration('agentDashboard');
+    if (!config.get<boolean>('peerSync', true)) {
+      this._state = 'unavailable';
+      this._message = 'Peer sync is disabled. Enable agentDashboard.peerSync to discover other instances.';
+      return;
+    }
+
+    const peers = this.discoverPeers();
+    if (peers.length === 0) {
+      this._state = 'connected';
+      this._message = 'No peer instances discovered.';
+      return;
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+
+    const results = await Promise.all(peers.map(peer => this.fetchPeerState(peer.port).then(state => ({ peer, state }))));
+
+    for (const { peer, state } of results) {
+      if (!state || !state.agents) { failCount++; continue; }
+
+      // Self-detection via instanceId (belt-and-suspenders)
+      if ((state as any).instanceId === this.instanceId) { continue; }
+
+      for (const agent of state.agents) {
+        // Loop prevention: never import agents that originated from a peer provider
+        if (agent.sourceProvider === 'peer-instances') { continue; }
+
+        this._agents.push({
+          ...agent,
+          id: `peer-${peer.port}-${agent.id}`,
+          sourceProvider: this.id,
+          location: 'peer',
+          remoteHost: `VS Code :${peer.port}${peer.workspace ? ` (${peer.workspace})` : ''}`,
+        });
+      }
+
+      for (const activity of (state.activities || []).slice(0, 10)) {
+        this._activities.push({
+          ...activity,
+          agent: `[Peer :${peer.port}] ${activity.agent}`,
+        });
+      }
+
+      successCount++;
+    }
+
+    if (successCount > 0) {
+      this._state = 'connected';
+      this._message = `Synced with ${successCount} peer(s) — ${this._agents.length} agent(s)`;
+    } else if (failCount > 0) {
+      this._state = 'degraded';
+      this._message = `Failed to connect to ${failCount} peer(s)`;
+    } else {
+      this._state = 'connected';
+      this._message = 'No peer instances discovered.';
+    }
+  }
+
+  private discoverPeers(): { port: number; workspace?: string }[] {
+    const peers = new Map<number, { port: number; workspace?: string }>();
+    const config = vscode.workspace.getConfiguration('agentDashboard');
+    const ownPort = config.get<number>('apiPort', 19850);
+
+    // Auto-discovery from registry file
+    try {
+      if (fs.existsSync(this.registryPath)) {
+        const registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+        const now = Date.now();
+        for (const [id, entry] of Object.entries(registry.instances || {})) {
+          const e = entry as any;
+          if (id === this.instanceId) { continue; }
+          if (e.port === ownPort) { continue; }
+          if (now - e.lastHeartbeat > 30_000) { continue; }
+          peers.set(e.port, { port: e.port, workspace: e.workspace });
+        }
+      }
+    } catch {
+      this._outputChannel.appendLine(`[${this.id}] Could not read instance registry`);
+    }
+
+    // Manual config fallback
+    const manualPorts = config.get<number[]>('peerPorts', []);
+    for (const port of manualPorts) {
+      if (port === ownPort) { continue; }
+      if (!peers.has(port)) { peers.set(port, { port }); }
+    }
+
+    return Array.from(peers.values());
+  }
+
+  private fetchPeerState(port: number): Promise<DashboardState | null> {
+    return new Promise((resolve) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: '/api/state',
+        method: 'GET',
+        timeout: 2000,
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk: any) => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    });
+  }
+
+  async getConversationHistory(agentId: string): Promise<ConversationTurn[]> {
+    const match = agentId.match(/^peer-(\d+)-(.+)$/);
+    if (!match) { return []; }
+    const port = parseInt(match[1]);
+    const originalAgentId = match[2];
+
+    return new Promise((resolve) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: `/api/agents/${encodeURIComponent(originalAgentId)}/conversation`,
+        method: 'GET',
+        timeout: 5000,
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk: any) => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve(parsed.turns || []);
+          } catch { resolve([]); }
+        });
+      });
+      req.on('error', () => resolve([]));
+      req.on('timeout', () => { req.destroy(); resolve([]); });
+      req.end();
+    });
+  }
+}
+
 // ─── Dashboard Provider (orchestrates everything) ────────────────────────────
 
 class DashboardProvider {
@@ -3033,6 +3196,8 @@ class DashboardProvider {
   private agentFirstSeen: Map<string, number> = new Map();
   private previousAgentStatuses: Map<string, string> = new Map();
   private previousProviderStates: Map<string, HealthState> = new Map();
+  private readonly instanceId: string = crypto.randomBytes(4).toString('hex');
+  private readonly registryPath: string = path.join(os.homedir(), '.agent-dashboard', 'instances.json');
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -3050,6 +3215,7 @@ class DashboardProvider {
       { provider: new GitHubActionsProvider(this.outputChannel), group: 'both' },
       { provider: new RemoteConnectionProvider(this.outputChannel), group: 'both' },
       { provider: new WorkspaceActivityProvider(this.outputChannel), group: 'both' },
+      { provider: new PeerInstanceProvider(this.outputChannel, this.instanceId), group: 'both' },
     ];
     this.providers = this.getActiveProviders();
     this.alertEngine = new AlertEngine(this.outputChannel);
@@ -3474,6 +3640,8 @@ class DashboardProvider {
     } else {
       this.outputChannel.appendLine(`[dashboard] WARNING: No panel open, skipping webview update`);
     }
+
+    this.updateHeartbeat();
   }
 
   private async pushToCloudRelay(state: DashboardState) {
@@ -3600,13 +3768,18 @@ class DashboardProvider {
 
       if (req.url === '/api/state' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(this.lastState ?? { agents: [], activities: [], stats: { total: 0, active: 0, completed: 0, tokens: 0, estimatedCost: 0, avgDuration: '—' }, dataSourceHealth: [] }));
+        const statePayload = {
+          ...(this.lastState ?? { agents: [], activities: [], stats: { total: 0, active: 0, completed: 0, tokens: 0, estimatedCost: 0, avgDuration: '—' }, dataSourceHealth: [] }),
+          instanceId: this.instanceId,
+        };
+        res.end(JSON.stringify(statePayload));
         return;
       }
 
       if (req.url === '/api/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', version: '0.9.4', uptime: process.uptime() }));
+        const ver = vscode.extensions.getExtension('amischreiber.agent-dashboard')?.packageJSON?.version ?? '0.0.0';
+        res.end(JSON.stringify({ status: 'ok', version: ver, uptime: process.uptime(), instanceId: this.instanceId }));
         return;
       }
 
@@ -3637,6 +3810,7 @@ class DashboardProvider {
     this.apiServer.listen(port, '0.0.0.0', () => {
       this.outputChannel.appendLine(`[api] REST API server listening on http://0.0.0.0:${port}`);
       vscode.window.showInformationMessage(`Agent Dashboard API running on port ${port}. Connect your iOS app to http://<your-ip>:${port}/api/state`);
+      this.registerInstance();
     });
 
     this.apiServer.on('error', (err: NodeJS.ErrnoException) => {
@@ -3690,6 +3864,26 @@ class DashboardProvider {
         lines.push(`    recentActions=${a.recentActions?.length || 0} items`);
         lines.push(`    conversationPreview=${a.conversationPreview?.length || 0} lines`);
       }
+    }
+    lines.push('');
+
+    // Show peer discovery info
+    lines.push('── Peer Discovery ──');
+    lines.push(`  Instance ID: ${this.instanceId}`);
+    try {
+      if (fs.existsSync(this.registryPath)) {
+        const registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+        for (const [id, entry] of Object.entries(registry.instances || {})) {
+          const e = entry as any;
+          const isSelf = id === this.instanceId;
+          const age = Date.now() - e.lastHeartbeat;
+          lines.push(`  ${isSelf ? '*' : ' '} ${id}: port=${e.port}, workspace=${e.workspace || '?'}, heartbeat=${age < 10000 ? 'live' : Math.round(age / 1000) + 's ago'}, pid=${e.pid}${isSelf ? ' (this instance)' : ''}`);
+        }
+      } else {
+        lines.push('  Registry file not found');
+      }
+    } catch (e: any) {
+      lines.push(`  Error reading registry: ${e?.message}`);
     }
     lines.push('');
 
@@ -3880,7 +4074,73 @@ class DashboardProvider {
     return count;
   }
 
+  // ── Peer Instance Registry ──────────────────────────────────────────────────
+
+  private registerInstance(): void {
+    try {
+      const registryDir = path.dirname(this.registryPath);
+      if (!fs.existsSync(registryDir)) {
+        fs.mkdirSync(registryDir, { recursive: true });
+      }
+
+      let registry: { instances: Record<string, any> } = { instances: {} };
+      if (fs.existsSync(this.registryPath)) {
+        try { registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8')); } catch { registry = { instances: {} }; }
+        if (!registry.instances) { registry.instances = {}; }
+      }
+
+      const config = vscode.workspace.getConfiguration('agentDashboard');
+      const port = config.get<number>('apiPort', 19850);
+
+      registry.instances[this.instanceId] = {
+        port,
+        pid: process.pid,
+        workspace: vscode.workspace.workspaceFolders?.[0]?.name || undefined,
+        startedAt: Date.now(),
+        lastHeartbeat: Date.now(),
+      };
+
+      // Clean stale entries
+      const now = Date.now();
+      for (const [id, entry] of Object.entries(registry.instances)) {
+        const e = entry as any;
+        if (id !== this.instanceId && now - e.lastHeartbeat > 60_000) {
+          try { process.kill(e.pid, 0); } catch { delete registry.instances[id]; }
+        }
+      }
+
+      fs.writeFileSync(this.registryPath, JSON.stringify(registry, null, 2));
+      this.outputChannel.appendLine(`[peer-registry] Registered instance ${this.instanceId} on port ${port}`);
+    } catch (err: any) {
+      this.outputChannel.appendLine(`[peer-registry] Registration error: ${err?.message}`);
+    }
+  }
+
+  private updateHeartbeat(): void {
+    try {
+      if (!fs.existsSync(this.registryPath)) { this.registerInstance(); return; }
+      const registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+      if (registry.instances?.[this.instanceId]) {
+        registry.instances[this.instanceId].lastHeartbeat = Date.now();
+        fs.writeFileSync(this.registryPath, JSON.stringify(registry, null, 2));
+      } else {
+        this.registerInstance();
+      }
+    } catch { /* best-effort */ }
+  }
+
+  private deregisterInstance(): void {
+    try {
+      if (!fs.existsSync(this.registryPath)) { return; }
+      const registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+      delete registry.instances?.[this.instanceId];
+      fs.writeFileSync(this.registryPath, JSON.stringify(registry, null, 2));
+      this.outputChannel.appendLine(`[peer-registry] Deregistered instance ${this.instanceId}`);
+    } catch { /* best-effort */ }
+  }
+
   dispose() {
+    this.deregisterInstance();
     this.panel?.dispose();
     this.stopPolling();
     this.stopApiServer();
@@ -3934,6 +4194,7 @@ function getNonce(): string {
 
 function getWebviewContent(webview: vscode.Webview): string {
   const nonce = getNonce();
+  const extVersion = vscode.extensions.getExtension('amischreiber.agent-dashboard')?.packageJSON?.version ?? '0.0.0';
   return /*html*/`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4058,6 +4319,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   .tag-local { background:var(--surface2); color:var(--text-dim); border:1px solid var(--border); }
   .tag-remote { background:var(--orange-glow); color:var(--orange); border:1px solid rgba(243,156,18,0.3); }
   .tag-cloud { background:var(--blue-glow); color:var(--cyan); border:1px solid rgba(0,206,201,0.3); }
+  .tag-peer { background:rgba(253,203,110,0.15); color:#fdcb6e; border:1px solid rgba(253,203,110,0.3); }
   .sb { font-size:9px; padding:3px 8px; border-radius:4px; font-weight:600; }
   .sb-running { background:var(--green-glow); color:var(--green); }
   .sb-thinking { background:var(--orange-glow); color:var(--orange); }
@@ -4196,7 +4458,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.9.4</span></h1>
+      <h1>Agent Dashboard <span>v${extVersion}</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -4761,7 +5023,8 @@ function getWebviewContent(webview: vscode.Webview): string {
           'claude-desktop-todos': 'Claude Desktop',
           'github-actions': 'GitHub Actions',
           'remote-connections': 'Remote',
-          'workspace-activity': 'Workspace'
+          'workspace-activity': 'Workspace',
+          'peer-instances': 'Peer Instances'
         };
         provNames[sp] = nameMap[sp] || sp;
       }
@@ -4931,7 +5194,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   // Mark that the script loaded successfully
   var dbg = document.createElement('div');
   dbg.style.cssText = 'position:fixed;bottom:4px;left:4px;font-size:8px;color:rgba(139,143,163,0.3);pointer-events:none;z-index:999;';
-  dbg.textContent = 'v0.9.4 loaded';
+  dbg.textContent = 'v${extVersion} loaded';
   document.body.appendChild(dbg);
 })();
 </script>
