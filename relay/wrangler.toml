@@ -14,4 +14,4 @@ id = "d4f3461fb3ba45d9a49f6fe466004585"
 [vars]
 # Set a shared secret so only your VS Code extension can push state
 # Change this to something unique!
-AUTH_TOKEN = "a6654d0d357ce3e1e31e1ba5486819aaa3dce28a42957d25ecdf5227c566e44e"
+AUTH_TOKEN = "77a02b2136f3e9f60d2e39530e211da46c08e5c364ce2f871f7ac926f47a13f1"
