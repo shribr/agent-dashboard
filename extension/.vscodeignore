@@ -3,5 +3,7 @@ node_modules/**
 .vscode/**
 tsconfig.json
 **/*.ts
+!dist/**/*.js
 **/*.map
 .vscodeignore
+.gitignore

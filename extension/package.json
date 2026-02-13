@@ -16,8 +16,31 @@
     "type": "git",
     "url": "https://github.com/shribr/agent-dashboard"
   },
-  "categories": ["Visualization", "Other"],
-  "activationEvents": [],
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#0f1117",
+    "theme": "dark"
+  },
+  "keywords": [
+    "copilot",
+    "claude",
+    "ai",
+    "agent",
+    "dashboard",
+    "monitoring",
+    "codex",
+    "llm",
+    "tokens"
+  ],
+  "categories": ["Visualization", "Machine Learning", "Other"],
+  "badges": [
+    {
+      "url": "https://img.shields.io/badge/License-MIT-green",
+      "href": "https://github.com/shribr/agent-dashboard/blob/main/LICENSE",
+      "description": "MIT License"
+    }
+  ],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
