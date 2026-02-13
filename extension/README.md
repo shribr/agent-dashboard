@@ -110,7 +110,7 @@ No configuration needed -- instances register themselves via a shared file at `~
 
 ### Mobile Monitoring (iOS Companion App)
 
-Monitor your agents from anywhere with the companion iOS app. Two connection modes:
+For the full Agent Dashboard experience, download the free **[Agent Dashboard](https://apps.apple.com/app/agent-dashboard/id6740261879)** companion app from the Apple App Store. Monitor your agents from anywhere with two connection modes:
 
 **Local Wi-Fi (zero setup):**
 The extension runs a REST API server on port 19850. Point the iOS app at your Mac's IP address and you're connected.
@@ -165,8 +165,10 @@ Open settings and set `agentDashboard.primarySource`:
 
 ### 3. Optional: Mobile Monitoring
 
+Download the free **[Agent Dashboard](https://apps.apple.com/app/agent-dashboard/id6740261879)** app from the Apple App Store for on-the-go monitoring.
+
 **Local (same Wi-Fi):**
-The REST API starts automatically. Install the iOS app and enter your Mac's IP.
+The REST API starts automatically. Open the iOS app and enter your Mac's IP.
 
 **Remote (anywhere):**
 1. Run `Agent Dashboard: Setup Cloud Relay` from the command palette
@@ -298,7 +300,7 @@ npm run setup    # Create KV namespace + deploy to Cloudflare
 - VS Code 1.85 or later
 - For Claude Code monitoring: Claude CLI installed (`~/.claude` directory)
 - For Copilot monitoring: GitHub Copilot extension installed
-- For mobile monitoring: iOS companion app (App Store)
+- For mobile monitoring: Free [Agent Dashboard iOS app](https://apps.apple.com/app/agent-dashboard/id6740261879) from the App Store
 - For cloud relay: Free Cloudflare account (optional)
 - For GitHub Actions monitoring: `gh` CLI installed (optional)
 
