@@ -2,7 +2,7 @@
   "name": "agent-dashboard",
   "displayName": "Agent Dashboard",
   "description": "Real-time visual monitoring dashboard for AI coding agents — Copilot, Claude Code, and more",
-  "version": "0.9.4",
+  "version": "0.10.1",
   "publisher": "amischreiber",
   "author": {
     "name": "Ami Schreiber",
@@ -32,7 +32,11 @@
     "llm",
     "tokens"
   ],
-  "categories": ["Visualization", "Machine Learning", "Other"],
+  "categories": [
+    "Visualization",
+    "Machine Learning",
+    "Other"
+  ],
   "badges": [
     {
       "url": "https://img.shields.io/badge/License-MIT-green",
@@ -40,7 +44,9 @@
       "description": "MIT License"
     }
   ],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -82,7 +88,11 @@
         "agentDashboard.primarySource": {
           "type": "string",
           "default": "copilot",
-          "enum": ["copilot", "claude-code", "both"],
+          "enum": [
+            "copilot",
+            "claude-code",
+            "both"
+          ],
           "enumDescriptions": [
             "GitHub Copilot Chat — monitors Copilot extension and VS Code Chat Sessions API",
             "Claude Code — monitors Claude CLI sessions, ~/.claude directory, and terminal processes",
@@ -134,7 +144,9 @@
         },
         "agentDashboard.peerPorts": {
           "type": "array",
-          "items": { "type": "number" },
+          "items": {
+            "type": "number"
+          },
           "default": [],
           "description": "Manually specify API ports of other Agent Dashboard instances to sync with. Used in addition to auto-discovery."
         },
@@ -166,7 +178,11 @@
         "agentDashboard.alerts.email.provider": {
           "type": "string",
           "default": "none",
-          "enum": ["none", "sendgrid", "smtp"],
+          "enum": [
+            "none",
+            "sendgrid",
+            "smtp"
+          ],
           "description": "Email provider for alerts"
         },
         "agentDashboard.alerts.email.sendgridApiKey": {
@@ -207,7 +223,10 @@
         "agentDashboard.alerts.sms.provider": {
           "type": "string",
           "default": "none",
-          "enum": ["none", "twilio"],
+          "enum": [
+            "none",
+            "twilio"
+          ],
           "description": "SMS provider for alerts"
         },
         "agentDashboard.alerts.sms.twilioAccountSid": {
@@ -238,10 +257,33 @@
         "agentDashboard.alerts.rules": {
           "type": "array",
           "default": [
-            { "event": "agent-completed", "channels": ["email"], "enabled": true },
-            { "event": "agent-error", "channels": ["email", "sms"], "enabled": true },
-            { "event": "agent-started", "channels": [], "enabled": false },
-            { "event": "provider-degraded", "channels": ["email"], "enabled": true }
+            {
+              "event": "agent-completed",
+              "channels": [
+                "email"
+              ],
+              "enabled": true
+            },
+            {
+              "event": "agent-error",
+              "channels": [
+                "email",
+                "sms"
+              ],
+              "enabled": true
+            },
+            {
+              "event": "agent-started",
+              "channels": [],
+              "enabled": false
+            },
+            {
+              "event": "provider-degraded",
+              "channels": [
+                "email"
+              ],
+              "enabled": true
+            }
           ],
           "description": "Alert rules — which events trigger which channels",
           "items": {
@@ -249,13 +291,27 @@
             "properties": {
               "event": {
                 "type": "string",
-                "enum": ["agent-completed", "agent-error", "agent-started", "provider-degraded"]
+                "enum": [
+                  "agent-completed",
+                  "agent-error",
+                  "agent-started",
+                  "provider-degraded"
+                ]
               },
               "channels": {
                 "type": "array",
-                "items": { "type": "string", "enum": ["email", "sms", "webhook"] }
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "email",
+                    "sms",
+                    "webhook"
+                  ]
+                }
               },
-              "enabled": { "type": "boolean" }
+              "enabled": {
+                "type": "boolean"
+              }
             }
           }
         }
