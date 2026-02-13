@@ -7,7 +7,7 @@
 ![Version](https://img.shields.io/badge/version-0.10.1-orange)
 
 <p align="center">
-  <img src="images/icon.png" alt="Agent Dashboard Icon" width="128" />
+  <img src="https://raw.githubusercontent.com/shribr/agent-dashboard/main/extension/images/icon.png" alt="Agent Dashboard Icon" width="128" />
 </p>
 
 ---
@@ -18,19 +18,19 @@
 
 See all your active AI agents at a glance — status, model, token usage, estimated cost, and task progress — all in one unified view.
 
-![Main Dashboard](images/dashboard-main.png)
+![Main Dashboard](https://raw.githubusercontent.com/shribr/agent-dashboard/main/extension/images/dashboard-main.png)
 
 ### Session Chat History
 
 Expand any agent to view the full conversation — user prompts, assistant responses, and every tool call with inputs and outputs.
 
-![Session Chat History](images/session-chat-history.png)
+![Session Chat History](https://raw.githubusercontent.com/shribr/agent-dashboard/main/extension/images/session-chat-history.png)
 
 ### Session Details
 
 Drill into session details including active tools, modified files, process info, and real-time token breakdown.
 
-![Session Details](images/session-details.png)
+![Session Details](https://raw.githubusercontent.com/shribr/agent-dashboard/main/extension/images/session-details.png)
 
 ---
 
