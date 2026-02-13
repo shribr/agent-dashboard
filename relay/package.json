@@ -4,9 +4,16 @@
   "description": "Cloudflare Worker relay for Agent Dashboard iOS app",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "setup": "node setup.js"
   },
   "devDependencies": {
     "wrangler": "^4.63.0"
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "DASHBOARD_STATE",
+      "id": "d4f3461fb3ba45d9a49f6fe466004585"
+    }
+  ]
 }

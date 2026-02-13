@@ -9,6 +9,13 @@ struct DashboardState: Codable {
     let stats: DashboardStats
     let dataSourceHealth: [DataSourceStatus]
     let primarySource: String?
+    let _relay: RelayMeta?
+}
+
+struct RelayMeta: Codable {
+    let updatedAt: String?
+    let source: String?
+    let instanceCount: Int?
 }
 
 struct AgentTask: Codable, Identifiable {

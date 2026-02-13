@@ -3198,6 +3198,8 @@ class DashboardProvider {
   private previousProviderStates: Map<string, HealthState> = new Map();
   private readonly instanceId: string = crypto.randomBytes(4).toString('hex');
   private readonly registryPath: string = path.join(os.homedir(), '.agent-dashboard', 'instances.json');
+  private _hostname: string = '';
+  private _username: string = '';
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -3644,6 +3646,17 @@ class DashboardProvider {
     this.updateHeartbeat();
   }
 
+  private resolveIdentity(): void {
+    if (!this._hostname) { this._hostname = os.hostname(); }
+    if (!this._username) {
+      try {
+        this._username = cp.execSync('git config user.name', { encoding: 'utf-8', timeout: 2000 }).trim();
+      } catch {
+        this._username = os.userInfo().username || '';
+      }
+    }
+  }
+
   private async pushToCloudRelay(state: DashboardState) {
     try {
       const config = vscode.workspace.getConfiguration('agentDashboard');
@@ -3651,12 +3664,24 @@ class DashboardProvider {
       const relayToken = config.get<string>('cloudRelayToken', '');
       if (!relayUrl) { return; }
 
+      this.resolveIdentity();
+
+      const enrichedState = {
+        ...state,
+        _instanceMeta: {
+          instanceId: this.instanceId,
+          hostname: this._hostname,
+          workspace: vscode.workspace.workspaceFolders?.[0]?.name || '',
+          username: this._username,
+        },
+      };
+
       const url = relayUrl.replace(/\/$/, '') + '/api/state';
       const https = await import('https');
       const httpModule = url.startsWith('https') ? https : await import('http');
 
       const parsed = new URL(url);
-      const postData = JSON.stringify(state);
+      const postData = JSON.stringify(enrichedState);
 
       const req = httpModule.request({
         hostname: parsed.hostname,
@@ -3705,7 +3730,7 @@ class DashboardProvider {
           const url = baseUrl + '/api/conversations';
           const httpModule = url.startsWith('https') ? https : await import('http');
           const parsed = new URL(url);
-          const postData = JSON.stringify({ agentId: agent.id, turns });
+          const postData = JSON.stringify({ agentId: agent.id, turns, instanceId: this.instanceId });
 
           const req = httpModule.request({
             hostname: parsed.hostname,
