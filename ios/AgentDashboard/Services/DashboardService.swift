@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import UserNotifications
+import UIKit
 
 // MARK: - Connection Mode
 
@@ -40,6 +42,20 @@ class DashboardService: ObservableObject {
     // Discovery
     @Published var discoveredHosts: [String] = []
 
+    // Notifications
+    @Published var notificationSettings = NotificationSettings()
+    private var previousAgentStates: [String: String] = [:]
+    private var previousProviderStates: [String: String] = [:]
+    private var notificationCooldowns: [String: Date] = [:]
+    private let cooldownInterval: TimeInterval = 60
+
+    // Provider settings
+    @Published var providerSettings = ProviderSettings()
+
+    // Offline cache
+    @Published var isShowingCachedData: Bool = false
+    @Published var cachedAt: Date?
+
     init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 5
@@ -48,6 +64,9 @@ class DashboardService: ObservableObject {
 
         // Load saved settings
         loadSettings()
+        loadNotificationSettings()
+        loadProviderSettings()
+        loadCachedState()
     }
 
     // MARK: - Connection
@@ -121,10 +140,18 @@ class DashboardService: ObservableObject {
             let decoder = JSONDecoder()
             let dashboardState = try decoder.decode(DashboardState.self, from: data)
 
+            checkAndNotify(
+                agents: dashboardState.agents,
+                providerHealth: dashboardState.dataSourceHealth
+            )
+
             self.state = dashboardState
             self.isConnected = true
             self.connectionError = nil
             self.lastUpdated = Date()
+            self.isShowingCachedData = false
+
+            saveCachedState(dashboardState)
         } catch let error as DecodingError {
             connectionError = "Data format error: \(error.localizedDescription)"
             isConnected = false
@@ -253,6 +280,269 @@ class DashboardService: ObservableObject {
 
         let interval = UserDefaults.standard.double(forKey: "pollInterval")
         if interval > 0 { pollInterval = interval }
+    }
+
+    // MARK: - Notifications
+
+    func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                print("[Notifications] Authorization error: \(error.localizedDescription)")
+            }
+            print("[Notifications] Authorization granted: \(granted)")
+        }
+    }
+
+    private func checkAndNotify(agents: [AgentSession], providerHealth: [DataSourceStatus]) {
+        guard notificationSettings.enabled else { return }
+
+        for agent in agents {
+            let prevStatus = previousAgentStates[agent.id]
+
+            if let prev = prevStatus, prev != agent.status.rawValue {
+                if agent.status == .done && prev != AgentStatus.done.rawValue {
+                    if notificationSettings.isEventEnabled(.agentCompleted) {
+                        fireLocalNotification(
+                            event: .agentCompleted,
+                            name: agent.name,
+                            title: "Agent completed: \(agent.name)",
+                            body: "\"\(agent.task)\" finished successfully. Elapsed: \(agent.elapsed)"
+                        )
+                    }
+                }
+                if agent.status == .error && prev != AgentStatus.error.rawValue {
+                    if notificationSettings.isEventEnabled(.agentError) {
+                        fireLocalNotification(
+                            event: .agentError,
+                            name: agent.name,
+                            title: "Agent error: \(agent.name)",
+                            body: "\"\(agent.task)\" encountered an error."
+                        )
+                    }
+                }
+            }
+
+            if prevStatus == nil && (agent.status == .running || agent.status == .thinking) {
+                if notificationSettings.isEventEnabled(.agentStarted) {
+                    fireLocalNotification(
+                        event: .agentStarted,
+                        name: agent.name,
+                        title: "Agent started: \(agent.name)",
+                        body: "New session: \"\(agent.task)\" Model: \(agent.model)"
+                    )
+                }
+            }
+
+            previousAgentStates[agent.id] = agent.status.rawValue
+        }
+
+        for provider in providerHealth {
+            let prevState = previousProviderStates[provider.id]
+            if let prev = prevState, prev != HealthState.degraded.rawValue, provider.state == .degraded {
+                if notificationSettings.isEventEnabled(.providerDegraded) {
+                    fireLocalNotification(
+                        event: .providerDegraded,
+                        name: provider.name,
+                        title: "Data source degraded: \(provider.name)",
+                        body: provider.message
+                    )
+                }
+            }
+            previousProviderStates[provider.id] = provider.state.rawValue
+        }
+    }
+
+    private func fireLocalNotification(event: NotificationEvent, name: String, title: String, body: String) {
+        let cooldownKey = "\(event.rawValue):\(name)"
+        if let lastFired = notificationCooldowns[cooldownKey],
+           Date().timeIntervalSince(lastFired) < cooldownInterval {
+            return
+        }
+        notificationCooldowns[cooldownKey] = Date()
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = event.rawValue
+
+        let request = UNNotificationRequest(
+            identifier: "\(cooldownKey)-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("[Notifications] Failed to deliver: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func saveNotificationSettings() {
+        if let data = try? JSONEncoder().encode(notificationSettings) {
+            UserDefaults.standard.set(data, forKey: "notificationSettings")
+        }
+    }
+
+    private func loadNotificationSettings() {
+        if let data = UserDefaults.standard.data(forKey: "notificationSettings"),
+           let settings = try? JSONDecoder().decode(NotificationSettings.self, from: data) {
+            notificationSettings = settings
+        }
+    }
+
+    // MARK: - Provider Filtering
+
+    var filteredAgents: [AgentSession] {
+        guard let agents = state?.agents else { return [] }
+        return agents.filter { agent in
+            let source = providerSettings.primarySource
+            let matchesSource: Bool
+            switch source {
+            case "copilot":
+                matchesSource = agent.type == .copilot
+            case "claude-code":
+                matchesSource = agent.type == .claude
+            default:
+                matchesSource = true
+            }
+            let isEnabled = providerSettings.isProviderEnabled(agent.sourceProvider)
+            return matchesSource && isEnabled
+        }
+    }
+
+    func saveProviderSettings() {
+        if let data = try? JSONEncoder().encode(providerSettings) {
+            UserDefaults.standard.set(data, forKey: "providerSettings")
+        }
+    }
+
+    private func loadProviderSettings() {
+        if let data = UserDefaults.standard.data(forKey: "providerSettings"),
+           let settings = try? JSONDecoder().decode(ProviderSettings.self, from: data) {
+            providerSettings = settings
+        }
+    }
+
+    // MARK: - Offline Cache
+
+    private var cacheFileURL: URL {
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return documentsDir.appendingPathComponent("dashboard_state_cache.json")
+    }
+
+    private func saveCachedState(_ state: DashboardState) {
+        let cached = CachedDashboardState(
+            state: state,
+            cachedAt: Date().timeIntervalSince1970,
+            serverVersion: serverVersion
+        )
+        do {
+            let data = try JSONEncoder().encode(cached)
+            try data.write(to: cacheFileURL, options: .atomic)
+        } catch {
+            print("[Cache] Failed to save: \(error.localizedDescription)")
+        }
+    }
+
+    private func loadCachedState() {
+        guard FileManager.default.fileExists(atPath: cacheFileURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: cacheFileURL)
+            let cached = try JSONDecoder().decode(CachedDashboardState.self, from: data)
+            self.state = cached.state
+            self.cachedAt = Date(timeIntervalSince1970: cached.cachedAt)
+            self.isShowingCachedData = true
+            self.serverVersion = cached.serverVersion
+        } catch {
+            print("[Cache] Failed to load: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Diagnostics
+
+    func generateDiagnosticReport() -> String {
+        var lines: [String] = []
+        lines.append("=== Agent Dashboard iOS Diagnostics ===")
+        lines.append("Time: \(ISO8601DateFormatter().string(from: Date()))")
+        lines.append("Platform: iOS \(UIDevice.current.systemVersion)")
+        lines.append("App Version: 1.0.0")
+        lines.append("")
+
+        lines.append("-- Connection --")
+        lines.append("  Mode: \(connectionMode.rawValue)")
+        lines.append("  Base URL: \(baseURL)")
+        lines.append("  Status: \(isConnected ? "Connected" : "Disconnected")")
+        lines.append("  Poll Interval: \(pollInterval)s")
+        if let version = serverVersion {
+            lines.append("  Server Version: \(version)")
+        }
+        if let lastUpdated = lastUpdated {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .medium
+            lines.append("  Last Updated: \(formatter.string(from: lastUpdated))")
+        }
+        if let error = connectionError {
+            lines.append("  Error: \(error)")
+        }
+        lines.append("")
+
+        lines.append("-- Data Source Health --")
+        if let sources = state?.dataSourceHealth {
+            for source in sources {
+                lines.append("  \(source.id): \(source.state.rawValue) - \(source.message) (\(source.agentCount) agents)")
+            }
+        } else {
+            lines.append("  (no data)")
+        }
+        lines.append("")
+
+        lines.append("-- Agent Summary --")
+        if let agents = state?.agents {
+            lines.append("  Total: \(agents.count)")
+            let byStatus = Dictionary(grouping: agents, by: { $0.status })
+            for (status, group) in byStatus.sorted(by: { $0.value.count > $1.value.count }) {
+                lines.append("  \(status.displayName): \(group.count)")
+            }
+            lines.append("")
+            let byProvider = Dictionary(grouping: agents, by: { $0.sourceProvider })
+            lines.append("  By Provider:")
+            for (provider, group) in byProvider.sorted(by: { $0.value.count > $1.value.count }) {
+                lines.append("    \(provider): \(group.count)")
+            }
+        } else {
+            lines.append("  (no data)")
+        }
+        lines.append("")
+
+        lines.append("-- Notification Settings --")
+        lines.append("  Enabled: \(notificationSettings.enabled)")
+        for event in NotificationEvent.allCases {
+            lines.append("  \(event.displayName): \(notificationSettings.isEventEnabled(event))")
+        }
+        lines.append("")
+
+        lines.append("-- Provider Settings --")
+        lines.append("  Primary Source: \(providerSettings.primarySource)")
+        if let sources = state?.dataSourceHealth {
+            for source in sources {
+                lines.append("  \(source.id): \(providerSettings.isProviderEnabled(source.id) ? "enabled" : "disabled")")
+            }
+        }
+        lines.append("")
+
+        lines.append("-- Offline Cache --")
+        lines.append("  Showing Cached: \(isShowingCachedData)")
+        if let cachedAt = cachedAt {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .medium
+            lines.append("  Cached At: \(formatter.string(from: cachedAt))")
+        }
+
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Helpers

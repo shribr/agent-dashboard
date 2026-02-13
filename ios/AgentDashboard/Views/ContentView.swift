@@ -11,14 +11,37 @@ struct ContentView: View {
         case health = "Health"
     }
 
+    private var hasDisplayableState: Bool {
+        service.isConnected || (service.state != nil && service.isShowingCachedData)
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if service.isConnected {
+                if hasDisplayableState {
                     // Stats bar
                     StatsBar(stats: service.state?.stats)
                         .padding(.horizontal)
                         .padding(.top, 8)
+
+                    // Stale data banner
+                    if service.isShowingCachedData, let cachedAt = service.cachedAt {
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.caption2)
+                            Text(service.isConnected ? "Showing cached data from" : "Offline — cached data from")
+                                .font(.caption2)
+                            Text(cachedAt, style: .relative)
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                        }
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity)
+                        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal)
+                    }
 
                     // Tab picker
                     Picker("View", selection: $selectedTab) {
@@ -33,7 +56,7 @@ struct ContentView: View {
                     // Content
                     switch selectedTab {
                     case .agents:
-                        AgentListView(agents: service.state?.agents ?? [])
+                        AgentListView(agents: service.filteredAgents)
                     case .activity:
                         ActivityListView(activities: service.state?.activities ?? [])
                     case .health:

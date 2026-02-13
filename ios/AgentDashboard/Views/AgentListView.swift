@@ -853,6 +853,21 @@ struct AgentDetailPanel: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+
+                    // Agent control notice
+                    Divider()
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Agent control (pause, resume, stop) is not yet available. This requires the proposed VS Code Chat Sessions API.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(10)
+                    .background(Color(.tertiarySystemFill).opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
                 }
                 .padding()
             }

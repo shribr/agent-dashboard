@@ -140,7 +140,7 @@ enum AgentType: String, Codable {
     case copilot, claude, codex, custom
 }
 
-enum AgentStatus: String, Codable {
+enum AgentStatus: String, Codable, CaseIterable {
     case running, thinking, paused, done, error, queued
 
     var displayName: String {
@@ -314,4 +314,76 @@ struct HealthCheckResponse: Codable {
     let status: String
     let version: String
     let uptime: Double
+}
+
+// MARK: - Notification Models
+
+enum NotificationEvent: String, CaseIterable, Codable {
+    case agentCompleted = "agent-completed"
+    case agentError = "agent-error"
+    case agentStarted = "agent-started"
+    case providerDegraded = "provider-degraded"
+
+    var displayName: String {
+        switch self {
+        case .agentCompleted: return "Agent Completed"
+        case .agentError: return "Agent Error"
+        case .agentStarted: return "Agent Started"
+        case .providerDegraded: return "Provider Degraded"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .agentCompleted: return "checkmark.circle.fill"
+        case .agentError: return "exclamationmark.triangle.fill"
+        case .agentStarted: return "play.circle.fill"
+        case .providerDegraded: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var defaultEnabled: Bool {
+        switch self {
+        case .agentCompleted: return true
+        case .agentError: return true
+        case .agentStarted: return false
+        case .providerDegraded: return true
+        }
+    }
+}
+
+struct NotificationSettings: Codable {
+    var enabled: Bool = false
+    var eventToggles: [String: Bool] = [:]
+
+    func isEventEnabled(_ event: NotificationEvent) -> Bool {
+        eventToggles[event.rawValue] ?? event.defaultEnabled
+    }
+
+    mutating func setEventEnabled(_ event: NotificationEvent, _ enabled: Bool) {
+        eventToggles[event.rawValue] = enabled
+    }
+}
+
+// MARK: - Provider Settings
+
+struct ProviderSettings: Codable {
+    var primarySource: String = "both"
+    var enabledProviders: [String: Bool] = [:]
+
+    func isProviderEnabled(_ id: String) -> Bool {
+        enabledProviders[id] ?? true
+    }
+
+    mutating func toggleProvider(_ id: String) {
+        enabledProviders[id] = !(enabledProviders[id] ?? true)
+    }
+}
+
+// MARK: - Cached State
+
+struct CachedDashboardState: Codable {
+    let state: DashboardState
+    let cachedAt: Double
+    let serverVersion: String?
 }

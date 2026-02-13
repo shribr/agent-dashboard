@@ -8,6 +8,11 @@ struct AgentDashboardApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(service)
+                .onAppear {
+                    if service.notificationSettings.enabled {
+                        service.requestNotificationPermission()
+                    }
+                }
         }
     }
 }
