@@ -4196,7 +4196,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   <div class="header">
     <div class="header-left">
       <div class="logo">A</div>
-      <h1>Agent Dashboard <span>v0.9.3</span></h1>
+      <h1>Agent Dashboard <span>v0.9.4</span></h1>
     </div>
     <div class="header-right">
       <div class="live-badge"><div class="live-dot"></div> <span id="live-time">Live</span></div>
@@ -4931,7 +4931,7 @@ function getWebviewContent(webview: vscode.Webview): string {
   // Mark that the script loaded successfully
   var dbg = document.createElement('div');
   dbg.style.cssText = 'position:fixed;bottom:4px;left:4px;font-size:8px;color:rgba(139,143,163,0.3);pointer-events:none;z-index:999;';
-  dbg.textContent = 'v0.9.3 loaded';
+  dbg.textContent = 'v0.9.4 loaded';
   document.body.appendChild(dbg);
 })();
 </script>
